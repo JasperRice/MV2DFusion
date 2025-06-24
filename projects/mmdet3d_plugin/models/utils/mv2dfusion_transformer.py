@@ -165,7 +165,48 @@ class MV2DFusionTransformerDecoderLayer(BaseModule):
         prev_ref_point=None,
         **kwargs,
     ):
+        """Custom Transformer Decoder Layer for MV2DFusionHead.
 
+        This layer integrates both self-attention and cross-attention mechanisms
+        tailored for multi-view 2D fusion tasks. It supports:
+        - Temporal modeling through memory integration
+        - Multi-modal fusion (image and point cloud features)
+        - Gradient checkpointing for memory efficiency
+
+        Args:
+            attn_cfgs (list[dict]): Configurations for attention modules.
+                'MultiheadAttention' + 'MixedCrossAttention'
+            ffn_cfgs (dict): Configuration for feed-forward network.
+            operation_order (tuple[str]): Execution order of operations.
+            norm_cfg (dict): Normalization configuration.
+            init_cfg (dict, optional): Weight initialization config.
+            batch_first (bool): If True, input tensors are (batch, seq, feature).
+            with_cp (bool): Whether to use gradient checkpointing.
+
+        Operations:
+            Supports 'self_attn', 'cross_attn', 'norm', and 'ffn' in any order
+
+        Inputs:
+            query (Tensor): [B, num_query, C]
+            query_pos (Tensor): Positional embeddings [B, num_query, C]
+            temp_memory (Tensor): Temporal memory features [B, mem_len, C]
+            temp_pos (Tensor): Temporal position embeddings [B, mem_len, C]
+            feat_flatten_img (Tensor): Flattened image features [B*N, H*W, C]
+            spatial_flatten_img (Tensor): Spatial info for image features [B*N, 2]
+            level_start_index_img (Tensor): Start indices for FPN levels
+            pc_range (Tensor): Point cloud range [6]
+            img_metas (list[dict]): Image metadata
+            lidar2img (Tensor): LiDAR to image transform [B, N, 4, 4]
+            feat_flatten_pts (Tensor): Point cloud features [B, num_pts, C]
+            pos_flatten_pts (Tensor): Point cloud positions [B, num_pts, 3]
+            attn_masks (Tensor): Attention masks
+            query_key_padding_mask (Tensor): Padding mask for queries
+            key_padding_mask (Tensor): Padding mask for keys
+            prev_ref_point (Tensor): Previous reference points [B, num_query, 3]
+
+        Returns:
+            Tensor: Updated query features [B, num_query, C]
+        """
         norm_index = 0
         attn_index = 0
         ffn_index = 0
@@ -188,6 +229,7 @@ class MV2DFusionTransformerDecoderLayer(BaseModule):
 
         for layer in self.operation_order:
             if layer == "self_attn":
+                # Concatenate history query queue
                 if temp_memory is not None:
                     temp_key = temp_value = torch.cat([query, temp_memory], dim=0)
                     temp_pos = torch.cat([query_pos, temp_pos], dim=0)
@@ -364,7 +406,7 @@ class MV2DFusionTransformerDecoder(BaseModule):
         intermediate = []
         intermediate_reference_points = [reference_points]
         intermediate_dyn_q_logits = []
-        for i, layer in enumerate(self.layers):
+        for i, layer in enumerate(self.layers):  # MV2DFusionTransformerDecoderLayer * 6
             query = layer(
                 query,
                 *args,

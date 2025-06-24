@@ -125,6 +125,29 @@ class ImageDistributionQueryGenerator(ImageSinglePointQueryGenerator):
         n_rois_per_batch,
         kwargs=dict(),
     ):
+        """_summary_
+
+        Args:
+            x (_type_): _description_
+            intrinsics (_type_): _description_
+            extrinsics (_type_): _description_
+            extra_feats (_type_): _description_
+            return_feats (_type_): _description_
+            n_rois_per_batch (_type_): _description_
+            kwargs (_type_, optional): _description_. Defaults to dict().
+
+        Returns:
+            center_sample_batch (List[torch.Tensor]):
+                Centers converted to LiDAR coordinates, split by batch. Each tensor has shape:
+                (n_rois_batch, prob_bin, 4), where last dim = (x, y, z, depth_prob)
+            return_feats (Dict[str, Union[torch.Tensor, List[torch.Tensor]]]):
+                Augmented feature dictionary with keys:
+                - `query_feats`: List of split input features by batch
+                - `depth_logits`: Raw depth scores (n_rois, prob_bin)
+                - `depth_bin`: Depth bin values (prob_bin,)
+                - `cls_scores` & `bbox_preds` (if enabled)
+                - `d_loss` (during training): Depth guidance loss scalar
+        """
         x = torch.nan_to_num(x)
         # separate branches
         x_cls = x
