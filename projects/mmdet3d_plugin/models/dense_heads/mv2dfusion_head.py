@@ -531,6 +531,57 @@ class MV2DFusionHead(AnchorFreeHead):
         )
 
     def temporal_alignment(self, query_pos, tgt, reference_points):
+        """
+        Align current frame queries with historical memory for temporal modeling.
+
+        This method performs temporal alignment between current frame queries and
+        stored memory features to enable consistent tracking and prediction over time.
+
+        Args:
+            query_pos (torch.Tensor):
+                Positional embeddings for current frame queries.
+                Shape: (B, num_query, embed_dims)
+            tgt (torch.Tensor):
+                Content features for current frame queries.
+                Shape: (B, num_query, embed_dims)
+            reference_points (torch.Tensor):
+                Normalized reference points for current queries (in [0,1] range).
+                Shape: (B, num_query, 3)
+
+        Returns:
+            tgt (torch.Tensor):
+                Updated content features after temporal alignment.
+                Shape: (B, num_query + num_propagated, embed_dims)
+            query_pos (torch.Tensor):
+                Updated positional embeddings after temporal alignment.
+                Shape: (B, num_query + num_propagated, embed_dims)
+            reference_points (torch.Tensor):
+                Updated reference points after temporal alignment.
+                Shape: (B, num_query + num_propagated, 3)
+            temp_memory (torch.Tensor):
+                Historical memory features (excluding propagated queries).
+                Shape: (B, memory_len - num_propagated, embed_dims)
+            temp_pos (torch.Tensor):
+                Positional embeddings for historical memory features.
+                Shape: (B, memory_len - num_propagated, embed_dims)
+            rec_ego_pose (torch.Tensor):
+                Reconstructed ego pose transformations for alignment.
+                Shape: (B, num_query + num_propagated, 4, 4)
+
+        Processing Steps:
+        1. Normalize historical reference points to [0,1] range
+        2. Generate positional embeddings for historical features
+        3. Initialize ego pose transformations as identity matrices
+        4. If with_ego_pos=True:
+           - Encode ego motion for current frame and update features
+           - Encode ego motion for historical frames and update features
+        5. Add time embeddings to current and historical features
+        6. Concatenate propagated historical queries with current queries
+        7. Return updated features and remaining historical memory
+
+        Note: The first 'num_propagated' historical queries are concatenated with
+        current queries, while the remaining historical memory is returned separately.
+        """
         B = query_pos.size(0)
 
         temp_reference_point = (self.memory_reference_point - self.pc_range[:3]) / (
@@ -773,6 +824,35 @@ class MV2DFusionHead(AnchorFreeHead):
         )
 
     def gen_dynamic_query(self, static_query, dynamic_query, dynamic_query_feats=None):
+        """Process dynamic queries to create formatted batch tensors for 3D object detection.
+
+        Args:
+            static_query (torch.Tensor):
+                静态查询张量 (reference points), 没有参与实际运算
+            dynamic_query (list[torch.Tensor]): 来自 ImageDistributionQueryGenerator
+                List of dynamic queries per sample. Each tensor has shape:
+                (num_queries, num_points, 4) where last dimension is (x, y, z, confidence)
+            dynamic_query_feats (list[torch.Tensor], optional): 来自 ImageDistributionQueryGenerator
+                List of feature vectors associated with dynamic queries. Each tensor has shape:
+                (num_queries, embed_dims). Default: None
+
+        Returns:
+            query_ref (torch.Tensor):
+                Reference points (confidence-weighted centers).
+                Shape: (B, max_len, 3)
+            query_coords (torch.Tensor):
+                Normalized point coordinates.
+                Shape: (B, max_len, num_points, 3)
+            query_probs (torch.Tensor):
+                Confidence scores per point.
+                Shape: (B, max_len, num_points)
+            query_feats (torch.Tensor):
+                Feature vectors of dynamic queries.
+                Shape: (B, max_len, embed_dims)
+            query_mask (torch.Tensor): 都是1
+                Boolean mask indicating valid queries (1 = real, 0 = padded).
+                Shape: (B, max_len)
+        """
         B = len(dynamic_query)
         zero = static_query.sum() * 0
         max_len = max(x.size(0) for x in dynamic_query)
@@ -821,7 +901,66 @@ class MV2DFusionHead(AnchorFreeHead):
         pts_pos=None,
         **data,
     ):
+        """Forward pass for MV2DFusionHead.
+        Processes multi-modal inputs (image and point cloud) to generate
+        3D object detection predictions.
 
+        Args:
+            img_metas (list[dict]): Meta information for each image in the batch.
+            dyn_query (list[Tensor], optional): Dynamic queries from ImageDistributionQueryGenerator.
+                Each tensor has shape (num_queries, num_points, 4) for (x, y, z, confidence).
+            dyn_feats (list[Tensor], optional): Feature vectors for dynamic queries.
+                Each tensor has shape (num_queries, embed_dims).
+            pts_query_center (Tensor): Center points for point cloud queries.
+                Shape: (B, num_pts_queries, 3)
+            pts_query_feat (Tensor): Feature vectors for point cloud queries.
+                Shape: (B, num_pts_queries, embed_dims)
+            pts_feat (Tensor): Point cloud features from point encoder.
+                Shape: (B, num_points, feat_dim)
+            pts_pos (Tensor): Positional embeddings for point cloud features.
+                Shape: (B, num_points, pos_dim)
+            **data (dict): Additional input data containing:
+                - intrinsics (Tensor): Camera intrinsics. Shape: (B, N, 3, 3)
+                - extrinsics (Tensor): Camera extrinsics. Shape: (B, N, 4, 4)
+                - img_feats_for_det (list[Tensor]): Image feature pyramid from backbone.
+                  Each tensor shape: (B, N, C, H, W)
+                - lidar2img (Tensor): LiDAR to image transformation. Shape: (B, N, 4, 4)
+                - ego_pose (Tensor): Ego vehicle pose. Shape: (B, 4, 4)
+                - ego_pose_inv (Tensor): Inverse ego vehicle pose. Shape: (B, 4, 4)
+                - timestamp (Tensor): Timestamp for each sample. Shape: (B,)
+                - prev_exists (Tensor): Indicates if previous frame exists. Shape: (B,)
+
+        Returns:
+            dict: Dictionary containing:
+                - all_cls_scores (Tensor): Classification scores from all decoder layers.
+                  Shape: (num_layers, B, num_query, num_classes)
+                - all_bbox_preds (Tensor): Bounding box predictions from all decoder layers.
+                  Shape: (num_layers, B, num_query, code_size)
+                - dyn_cls_scores (Tensor): Classification scores for dynamic queries.
+                - dyn_bbox_preds (Tensor): Bounding box predictions for dynamic queries.
+                - dn_mask_dict (dict, optional): Denoising mask dictionary if used.
+
+        Processing Pipeline:
+        1. Initialize/update memory bank
+        2. Process image features:
+           - Align multi-scale features using spatial alignment module
+           - Flatten and concatenate features across scales
+        3. Process point cloud features:
+           - Embed point features using MLP
+        4. Generate image queries:
+           - Normalize coordinates and compute reference points
+        5. Generate point cloud queries:
+           - Normalize center coordinates
+        6. Prepare denoising components (if training)
+        7. Build attention masks for padded queries
+        8. Construct query content features
+        9. Generate positional embeddings for queries
+        10. Perform temporal alignment with memory
+        11. Encode position distribution for image queries
+        12. Pass through transformer decoder
+        13. Generate predictions from decoder outputs
+        14. Apply post-processing (NMS) and update memory
+        """
         # zero init the memory bank
         self.pre_update_memory(data)
 
@@ -917,15 +1056,17 @@ class MV2DFusionHead(AnchorFreeHead):
         )
         tgt = self.dyn_q_enc(tgt, pad_query_feats)
 
-        # query positional encoding
-        query_pos = self.query_embedding(pos2posemb3d(reference_points))
+        # query positional encoding: PE
+        query_pos = self.query_embedding(pos2posemb3d(reference_points))  # equation 12
         tgt, query_pos, reference_points, temp_memory, temp_pos, rec_ego_pose = (
             self.temporal_alignment(query_pos, tgt, reference_points)
         )
 
-        # encode position distribution for image query
-        query_pos_det = self.dyn_q_pos(query_coords.flatten(-2, -1))
-        query_pos_det = self.dyn_q_pos_with_prob(query_pos_det, query_probs)
+        # encode position distribution for image query: U-PE
+        query_pos_det = self.dyn_q_pos(query_coords.flatten(-2, -1))  # equation 13
+        query_pos_det = self.dyn_q_pos_with_prob(
+            query_pos_det, query_probs
+        )  # equation 14
         query_pos[:, pad_size + num_query_pts : pad_size + self.num_query] = (
             query_pos_det
         )

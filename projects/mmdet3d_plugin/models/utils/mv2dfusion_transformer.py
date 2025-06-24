@@ -165,7 +165,50 @@ class MV2DFusionTransformerDecoderLayer(BaseModule):
         prev_ref_point=None,
         **kwargs,
     ):
+        """Custom Transformer Decoder Layer for MV2DFusionHead.
 
+        This layer integrates both self-attention and cross-attention mechanisms
+        tailored for multi-view 2D fusion tasks. It supports:
+        - Temporal modeling through memory integration
+        - Multi-modal fusion (image and point cloud features)
+        - Gradient checkpointing for memory efficiency
+
+        ================ __init__ ================
+        Args:
+            attn_cfgs (list[dict]): Configurations for attention modules.
+                'MultiheadAttention' + 'MixedCrossAttention'
+            ffn_cfgs (dict): Configuration for feed-forward network.
+            operation_order (tuple[str]): Execution order of operations.
+            norm_cfg (dict): Normalization configuration.
+            init_cfg (dict, optional): Weight initialization config.
+            batch_first (bool): If True, input tensors are (batch, seq, feature).
+            with_cp (bool): Whether to use gradient checkpointing.
+
+        Operations:
+            Supports 'self_attn', 'cross_attn', 'norm', and 'ffn' in any order
+
+        ================ _forward ================
+        Inputs:
+            query (Tensor): [B, num_query, C]
+            query_pos (Tensor): Positional embeddings [B, num_query, C]
+            temp_memory (Tensor): Temporal memory features [B, mem_len, C]
+            temp_pos (Tensor): Temporal position embeddings [B, mem_len, C]
+            feat_flatten_img (Tensor): Flattened image features [B*N, H*W, C]
+            spatial_flatten_img (Tensor): Spatial info for image features [B*N, 2]
+            level_start_index_img (Tensor): Start indices for FPN levels
+            pc_range (Tensor): Point cloud range [6]
+            img_metas (list[dict]): Image metadata
+            lidar2img (Tensor): LiDAR to image transform [B, N, 4, 4]
+            feat_flatten_pts (Tensor): Point cloud features [B, num_pts, C]
+            pos_flatten_pts (Tensor): Point cloud positions [B, num_pts, 3]
+            attn_masks (Tensor): Attention masks
+            query_key_padding_mask (Tensor): Padding mask for queries
+            key_padding_mask (Tensor): Padding mask for keys
+            prev_ref_point (Tensor): Previous reference points [B, num_query, 3]
+
+        Returns:
+            Tensor: Updated query features [B, num_query, C]
+        """
         norm_index = 0
         attn_index = 0
         ffn_index = 0
@@ -188,6 +231,7 @@ class MV2DFusionTransformerDecoderLayer(BaseModule):
 
         for layer in self.operation_order:
             if layer == "self_attn":
+                # Concatenate history query queue
                 if temp_memory is not None:
                     temp_key = temp_value = torch.cat([query, temp_memory], dim=0)
                     temp_pos = torch.cat([query_pos, temp_pos], dim=0)
@@ -358,13 +402,73 @@ class MV2DFusionTransformerDecoder(BaseModule):
         dyn_q_prob_branch=None,
         **kwargs,
     ):
+        """A transformer decoder layer for multi-view 2D feature fusion.
+
+        This decoder refines queries iteratively while dynamically updating reference points
+        and query positions using predicted probability distributions. Designed for camera-based
+        object detection with intermediate outputs.
+
+        Attributes:
+            num_layers (int): Number of transformer decoder layers.
+            layers (nn.ModuleList): Module list containing decoder layers.
+            embed_dims (int): Feature embedding dimensions.
+            pre_norm (bool): Whether to use pre-normalization in layers.
+            return_intermediate (bool): Flag to return intermediate outputs from all decoder layers.
+            post_norm (nn.Module): Optional post-normalization layer (typically LayerNorm).
+
+        ================ __init__ ================
+        Args:
+            transformerlayers (dict | list): Config for building transformer layers.
+                If a dict, it will be duplicated for all layers. If a list, must match `num_layers`.
+            num_layers (int): Number of transformer decoder layers.
+            init_cfg (dict, optional): Initialization config.
+            post_norm_cfg (dict, optional): Config for post-normalization layer.
+                Defaults to LayerNorm. Set to `None` to disable.
+            return_intermediate (bool): Whether to return outputs from every decoder layer.
+                Defaults to False.
+
+        Raises:
+            AssertionError: If `transformerlayers` is a list but its length doesn't match `num_layers`.
+
+        ================ forward ================
+        Forward pass with dynamic query and reference point updates.
+
+        Args:
+            query (Tensor): Input query embeddings, shape [B, num_queries, C].
+            query_pos (Tensor, optional): Position embeddings for queries.
+                Shape [B, num_queries, C].
+            reference_points (Tensor): Initial reference points (coordinates),
+                shape [B, num_queries, ...] (2D/3D).
+            dyn_q_coords (Tensor): Coordinates for dynamic queries,
+                shape [num_dynamic, sample_size, ...].
+            dyn_q_probs (Tensor): Initial probability distributions for dynamic queries,
+                shape [num_dynamic, sample_size].
+            dyn_q_mask (Tensor): Boolean mask identifying dynamic queries in input,
+                shape [B, num_queries].
+            dyn_q_pos_branch (nn.Module): Module for generating position features from coordinates.
+            dyn_q_pos_with_prob_branch (nn.Module): Module combining position features and probabilities.
+            dyn_q_prob_branch (nn.ModuleList): Module list for updating dynamic probabilities at each layer.
+            *args, **kwargs: Additional arguments passed to transformer layers.
+
+        Returns:
+            Tuple[Tensor]:
+            - out_queries: Output queries from all decoder layers (if `return_intermediate`),
+              shape [num_layers, B, num_queries, C].
+            - out_ref_points: Refined reference points from all layers (including initial),
+              shape [num_layers+1, B, num_queries, ...].
+            - out_dyn_logits: Logits for dynamic probabilities from all layers,
+              shape [num_layers, num_dynamic, sample_size].
+
+        Note:
+            This implementation assumes `return_intermediate=True`.
+        """
         assert self.return_intermediate
         dyn_q_logits = dyn_q_probs.log()
 
         intermediate = []
         intermediate_reference_points = [reference_points]
         intermediate_dyn_q_logits = []
-        for i, layer in enumerate(self.layers):
+        for i, layer in enumerate(self.layers):  # MV2DFusionTransformerDecoderLayer * 6
             query = layer(
                 query,
                 *args,
@@ -377,6 +481,7 @@ class MV2DFusionTransformerDecoder(BaseModule):
             else:
                 interm_q = query
 
+            # ============== Calibration ==============
             # get new dyn_q_probs
             dyn_q_logits_res = dyn_q_prob_branch[i](query.transpose(0, 1)[dyn_q_mask])
             dyn_q_logits = dyn_q_logits + dyn_q_logits_res
@@ -450,6 +555,63 @@ class MV2DFusionTransformer(BaseModule):
         dyn_q_pos_with_prob_branch=None,
         dyn_q_prob_branch=None,
     ):
+        """
+        ================ __init__ ================
+        Multi-View 2D Fusion Transformer for multimodal feature fusion.
+
+        This transformer architecture fuses features from multiple sensors (e.g.,
+        camera images and LiDAR point clouds) using encoder-decoder layers. It supports:
+        - Temporal memory integration for sequence modeling
+        - Dynamic query refinement for adaptive feature learning
+        - Multi-scale image feature processing
+        - Point cloud feature incorporation
+
+        Args:
+            encoder (dict, optional): Configuration for transformer encoder layers.
+                If None, no encoder will be used.
+            decoder (dict): Configuration for transformer decoder layers.
+            init_cfg (dict, optional): Initialization configuration.
+
+        ================ forward ================
+        Forward pass for multi-modal feature fusion.
+
+        Args:
+            tgt (torch.Tensor): Target input features. Shape [num_query, bs, embed_dims]
+            query_pos (torch.Tensor): Positional embeddings for queries.
+                Shape [num_query, bs, embed_dims]
+            attn_masks (torch.Tensor): Attention masks for image features.
+            feat_flatten_img (torch.Tensor): Flattened image features.
+                Shape [bs, H*W, embed_dims]
+            spatial_flatten_img (torch.Tensor): Spatial info from images.
+                Shape [bs, H*W, 2]
+            level_start_index_img (torch.Tensor): Start indices for FPN levels.
+            pc_range (list): Point cloud range [x_min, y_min, z_min, x_max, y_max, z_max]
+            img_metas (list[dict]): Metadata for images.
+            lidar2img (list[torch.Tensor]): LiDAR to image transformation matrices.
+            feat_flatten_pts (torch.Tensor, optional): Point cloud features.
+                Shape [bs, num_pts, embed_dims]
+            pos_flatten_pts (torch.Tensor, optional): Positional embeddings for points.
+                Shape [bs, num_pts, embed_dims]
+            temp_memory (torch.Tensor, optional): Temporal memory features.
+                Shape [num_mem, bs, embed_dims]
+            temp_pos (torch.Tensor, optional): Positional embeddings for temporal memory.
+                Shape [num_mem, bs, embed_dims]
+            cross_attn_masks (torch.Tensor, optional): Cross-attention masks (unused).
+            reference_points (torch.Tensor): Reference points for queries.
+                Shape [bs, num_query, 2 or 3]
+            dyn_q_coords (torch.Tensor, optional): Coordinates for dynamic queries.
+            dyn_q_probs (torch.Tensor, optional): Confidence scores for dynamic queries.
+            dyn_q_mask (torch.Tensor, optional): Mask indicating active dynamic queries.
+            dyn_q_pos_branch (callable, optional): Position encoding module for queries.
+            dyn_q_pos_with_prob_branch (callable, optional): Position encoding with confidence.
+            dyn_q_prob_branch (callable, optional): Module for confidence prediction.
+
+        Returns:
+            tuple:
+                torch.Tensor: Decoder output features. Shape [num_layers, bs, num_query, embed_dims]
+                torch.Tensor: Updated reference points. Shape [bs, num_query, 3]
+                torch.Tensor: Dynamic query logits. Shape [num_layers, ...]
+        """
         query_pos = query_pos.transpose(0, 1).contiguous()
 
         if tgt is None:
@@ -494,6 +656,26 @@ class MV2DFusionTransformer(BaseModule):
 
 @ATTENTION.register_module()
 class MixedCrossAttention(BaseModule):
+    """Mixed cross-attention module for fusing image and point cloud features.
+
+    This module performs dual-path cross-attention between:
+    1. Image features using multi-scale deformable attention
+    2. Point cloud features using geometric-aware attention
+
+    Attributes:
+        embed_dims (int): Embedding dimension size
+        num_groups (int): Number of attention groups for image cross-attention
+        num_levels (int): Number of feature levels in FPN
+        num_cams (int): Number of camera views
+        dropout (float): Dropout rate for output projection
+        num_pts (int): Number of sampling points per query
+        im2col_step (int): Step size for deformable attention im2col
+        batch_first (bool): Whether batch dimension is first in tensors
+        bias (float): Initialization bias for learnable_fc
+        bev_norm (int): Normalization factor for BEV coordinates
+        attn_cfg (dict): Configuration for point cloud attention module
+    """
+
     def __init__(
         self,
         embed_dims=256,
@@ -508,10 +690,24 @@ class MixedCrossAttention(BaseModule):
         bev_norm=1,
         attn_cfg=None,
     ):
+        """
+        Args:
+            embed_dims (int): Feature embedding dimensions. Defaults to 256.
+            num_groups (int): Number of attention groups. Defaults to 8.
+            num_levels (int): Number of feature pyramid levels. Defaults to 4.
+            num_cams (int): Number of camera views. Defaults to 6.
+            dropout (float): Dropout probability. Defaults to 0.1.
+            num_pts (int): Number of sampling points per query. Defaults to 13.
+            im2col_step (int): Step size for deformable attention. Defaults to 64.
+            batch_first (bool): If True, inputs are (B, ...). Defaults to True.
+            bias (float): Initialization range for bias in learnable_fc. Defaults to 2.0.
+            bev_norm (int): Normalization factor for BEV coordinates. Defaults to 1.
+            attn_cfg (dict): Config for point cloud attention module. Defaults to None.
+        """
         super(MixedCrossAttention, self).__init__()
         self.embed_dims = embed_dims
 
-        # image ca params
+        # Image cross-attention parameters
         self.num_groups = num_groups
         self.group_dims = self.embed_dims // self.num_groups
         self.num_levels = num_levels
@@ -530,7 +726,7 @@ class MixedCrossAttention(BaseModule):
             nn.LayerNorm(self.embed_dims),
         )
 
-        # point cloud ca params
+        # Point cloud cross-attention parameters
         self.attn = build_attention(attn_cfg)
         self.pts_q_embed = nn.Sequential(
             nn.Linear(13 * 32, self.embed_dims),
@@ -551,6 +747,16 @@ class MixedCrossAttention(BaseModule):
         self.bev_norm = bev_norm
 
     def pos2posemb2d(self, pos, num_pos_feats=128, temperature=20):
+        """Convert 2D position coordinates to positional embeddings.
+
+        Args:
+            pos (Tensor): Position coordinates, shape (..., 2)
+            num_pos_feats (int): Dimension of positional embeddings
+            temperature (int): Scaling factor for frequency calculation
+
+        Returns:
+            Tensor: Positional embeddings, shape (..., num_pos_feats*2)
+        """
         scale = 2 * math.pi
         pos = pos * scale
         dim_t = torch.arange(num_pos_feats, dtype=torch.float32, device=pos.device)
@@ -588,17 +794,41 @@ class MixedCrossAttention(BaseModule):
         feat_flatten_pts,
         pos_flatten_pts,
     ):
+        """Forward pass with dual-path feature fusion.
 
+        Processing steps:
+        1. Expand reference points using instance features
+        2. Perform image feature sampling via deformable attention
+        3. Refine features using point cloud attention
+
+        Args:
+            instance_feature (Tensor): Instance query features, shape (B, n_q, C)
+            query_pos (Tensor): Position embeddings for queries, shape (B, n_q, C)
+            reference_points (Tensor): Normalized reference points, shape (B, n_q, 3)
+            feat_flatten_img (Tensor): Flatten image features, shape (B*N, H*W, C)
+            spatial_flatten_img (Tensor): Flatten spatial positions, shape (B*N, H*W, 2)
+            level_start_index_img (Tensor): Start indices for each feature level
+            pc_range (Tensor): Point cloud range [x_min, y_min, z_min, x_max, y_max, z_max]
+            lidar2img_mat (Tensor): Transformation matrices, shape (B, N, 4, 4)
+            img_metas (list[dict]): Image meta information
+            feat_flatten_pts (Tensor): Flatten point cloud features, shape (B, H*W, C)
+            pos_flatten_pts (Tensor): Flatten BEV positions, shape (B, H*W, 2)
+
+        Returns:
+            Tensor: Refined instance features, shape (B, n_q, C)
+        """
         bs, num_anchor = reference_points.shape[:2]
 
+        # Convert to absolute coordinates
         reference_points = (
             reference_points * (pc_range[3:6] - pc_range[0:3]) + pc_range[0:3]
         )
+        # Generate key points around reference points
         key_points = reference_points.unsqueeze(-2) + self.learnable_fc(
             instance_feature
         ).reshape(bs, num_anchor, -1, 3)
 
-        # image cross-attention
+        # Image cross-attention
         weights_img = self._get_weights_img(instance_feature, query_pos, lidar2img_mat)
         features_img = self.feature_sampling_img(
             feat_flatten_img,
@@ -612,19 +842,23 @@ class MixedCrossAttention(BaseModule):
         output = self.output_proj_img(features_img)
         output = self.drop(output) + instance_feature
 
-        # point cloud cross-attention
+        # Point cloud cross-attention
         weights_pts = self._get_weights_pts(instance_feature, query_pos)
+        # Normalize key points coordinates
         key_points = (key_points[..., 0:2] - pc_range[0:2]) / (
             pc_range[3:5] - pc_range[0:2]
         )  # [B, n_q, 13, 2]
+        # Positional embeddings for query and key
         pts_q_pos = self.pts_q_embed(
             self.pos2posemb2d(key_points, num_pos_feats=16).flatten(-2, -1)
         )
         pts_k_pos = self.pts_k_embed(
             self.pos2posemb2d(pos_flatten_pts / self.bev_norm, num_pos_feats=128)
         )
+        # Probability-weighted query positions
         pts_q_pos = self.pts_q_prob(pts_q_pos, weights_pts.flatten(-2, -1))
-        output = self.attn(
+        # Attend to point cloud features
+        output = self.attn(  # PETRMultiheadFlashAttention
             output,
             key=feat_flatten_pts,
             value=feat_flatten_pts,
@@ -642,6 +876,16 @@ class MixedCrossAttention(BaseModule):
         dyn_q_mask=None,
         dyn_feats=None,
     ):
+        """Compute attention weights for image cross-attention.
+
+        Args:
+            instance_feature (Tensor): Query features (B, n_q, C)
+            anchor_embed (Tensor): Position embeddings (B, n_q, C)
+            lidar2img_mat (Tensor): Camera matrices (B, N, 4, 4)
+
+        Returns:
+            Tensor: Attention weights (B*N, n_groups, n_q, n_levels*num_pts)
+        """
         bs, num_anchor = instance_feature.shape[:2]
         lidar2img = lidar2img_mat[..., :3, :].flatten(-2)
         cam_embed = self.cam_embed(lidar2img)  # B, N, C
@@ -661,6 +905,15 @@ class MixedCrossAttention(BaseModule):
         return weights.flatten(end_dim=1)
 
     def _get_weights_pts(self, instance_feature, anchor_embed):
+        """Compute attention weights for point cloud cross-attention.
+
+        Args:
+            instance_feature (Tensor): Query features (B, n_q, C)
+            anchor_embed (Tensor): Position embeddings (B, n_q, C)
+
+        Returns:
+            Tensor: Attention weights (B, n_q, n_groups, num_pts)
+        """
         bs, num_anchor = instance_feature.shape[:2]
         feat_pos_pts = instance_feature + anchor_embed  # [B, n_q, C]
         weights = (
@@ -685,22 +938,40 @@ class MixedCrossAttention(BaseModule):
         lidar2img_mat,
         img_metas,
     ):
+        """Sample image features using multi-scale deformable attention.
+
+        Args:
+            feat_flatten (Tensor): Flatten features (B*N, L, C)
+            spatial_flatten (Tensor): Flatten positions (B*N, L, 2)
+            level_start_index (Tensor): Start indices of each level
+            key_points (Tensor): 3D reference points (B, n_q, num_pts, 3)
+            weights (Tensor): Attention weights (B*N, n_q, n_groups, n_levels*num_pts)
+            lidar2img_mat (Tensor): Transformation matrices (B, N, 4, 4)
+            img_metas (list[dict]): Image meta information
+
+        Returns:
+            Tensor: Aggregated image features (B, n_q, C)
+        """
         # key_points: [B, n_q, num_pts, 3]
         # lidar2img_mat: [B, V, 4, 4]
         bs, num_anchor, _ = key_points.shape[:3]
 
+        # Convert to homogeneous coordinates
         pts_extand = torch.cat(
             [key_points, torch.ones_like(key_points[..., :1])], dim=-1
         )
+        # Project to 2D image coordinates
         # points_2d: [B, V, n_q, num_pts, 3]
         points_2d = torch.matmul(
             lidar2img_mat[:, :, None, None], pts_extand[:, None, ..., None]
         ).squeeze(-1)
 
+        # Normalize to [0,1] range
         points_2d = points_2d[..., :2] / torch.clamp(points_2d[..., 2:3], min=1e-5)
         points_2d[..., 0:1] = points_2d[..., 0:1] / img_metas[0]["pad_shape"][0][1]
         points_2d[..., 1:2] = points_2d[..., 1:2] / img_metas[0]["pad_shape"][0][0]
 
+        # Prepare for deformable attention
         points_2d = points_2d.flatten(end_dim=1)  # [B * V, n_q, num_pts, 2]
         points_2d = points_2d[:, :, None, None, :, :].repeat(
             1, 1, self.num_groups, self.num_levels, 1, 1
@@ -708,6 +979,7 @@ class MixedCrossAttention(BaseModule):
 
         bn, num_value, _ = feat_flatten.size()
         feat_flatten = feat_flatten.reshape(bn, num_value, self.num_groups, -1)
+        # Deformable feature sampling
         # points_2d: [B * V, n_groups, n_levels, n_q, num_pts, 2]
         # weights: [B * V, n_q, n_groups, n_levels * n_pts]
         output = MultiScaleDeformableAttnFunction.apply(
@@ -719,8 +991,8 @@ class MixedCrossAttention(BaseModule):
             self.im2col_step,
         )
 
+        # Sum over camera views
         output = output.reshape(bs, self.num_cams, num_anchor, -1)
-
         return output.sum(1)
 
 
