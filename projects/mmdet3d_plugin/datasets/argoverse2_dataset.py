@@ -1,40 +1,51 @@
 # Copyright (c) 2023 megvii-model. All Rights Reserved.
 
-import mmcv
-import torch
-import numpy as np
-from .av2_utils import yaw_to_quat
-from mmdet3d.core.bbox import LiDARInstance3DBoxes
-from mmdet.datasets import DATASETS
-from  mmdet3d.datasets.custom_3d import Custom3DDataset
-from av2.evaluation.detection.constants import CompetitionCategories
-from pathlib import Path
-from .av2_utils import DetectionCfg
-from .av2_eval_util import evaluate
-from av2.utils.io import read_feather
 from os import path as osp
+from pathlib import Path
+
+import mmcv
+import numpy as np
+import torch
+from av2.evaluation.detection.constants import CompetitionCategories
+from av2.utils.io import read_feather
+from mmdet3d.core.bbox import LiDARInstance3DBoxes
+from mmdet3d.datasets.custom_3d import Custom3DDataset
+from mmdet.datasets import DATASETS
+
+from .av2_eval_util import evaluate
+from .av2_utils import DetectionCfg, yaw_to_quat
 
 LABEL_ATTR = (
-    "tx_m","ty_m","tz_m","length_m","width_m","height_m","qw","qx","qy","qz",
+    "tx_m",
+    "ty_m",
+    "tz_m",
+    "length_m",
+    "width_m",
+    "height_m",
+    "qw",
+    "qx",
+    "qy",
+    "qz",
 )
 
 
 class Argoverse2Dataset(Custom3DDataset):
     CLASSES = tuple(x.value for x in CompetitionCategories)
-    
-    def __init__(self,
-                 ann_file,
-                 split,
-                 pipeline=None,
-                 data_root=None,
-                 classes=None,
-                 load_interval=1,
-                 modality=None,
-                 box_type_3d='LiDAR',
-                 filter_empty_gt=True,
-                 test_mode=False,
-                 use_valid_flag=False,
-                 **kwargs
+
+    def __init__(
+        self,
+        ann_file,
+        split,
+        pipeline=None,
+        data_root=None,
+        classes=None,
+        load_interval=1,
+        modality=None,
+        box_type_3d="LiDAR",
+        filter_empty_gt=True,
+        test_mode=False,
+        use_valid_flag=False,
+        **kwargs,
     ):
         self.load_interval = load_interval
         super().__init__(
@@ -48,7 +59,7 @@ class Argoverse2Dataset(Custom3DDataset):
             test_mode=test_mode,
             **kwargs,
         )
-        
+
         self.split = split
         self.use_valid_flag = use_valid_flag
         if self.modality is None:
@@ -59,7 +70,7 @@ class Argoverse2Dataset(Custom3DDataset):
                 use_map=False,
                 use_external=False,
             )
-            
+
     def get_cat_ids(self, idx):
         """Get category distribution of single scene.
 
@@ -73,17 +84,17 @@ class Argoverse2Dataset(Custom3DDataset):
         """
         info = self.data_infos[idx]
         if self.use_valid_flag:
-            mask = info['valid_flag']
-            gt_names = set(info['gt3d_infos']['gt_names'][mask])
+            mask = info["valid_flag"]
+            gt_names = set(info["gt3d_infos"]["gt_names"][mask])
         else:
-            gt_names = set(info['gt3d_infos']['gt_names'])
+            gt_names = set(info["gt3d_infos"]["gt_names"])
 
         cat_ids = []
         for name in gt_names:
             if name in self.CLASSES:
                 cat_ids.append(self.cat2id[name])
         return cat_ids
-    
+
     def load_annotations(self, ann_file):
         """Load annotations from ann_file.
 
@@ -93,11 +104,11 @@ class Argoverse2Dataset(Custom3DDataset):
         Returns:
             list[dict]: List of annotations sorted by timestamps.
         """
-        data = mmcv.load(ann_file, file_format='pkl')
-        data_infos = data['infos'][::self.load_interval]
+        data = mmcv.load(ann_file, file_format="pkl")
+        data_infos = data["infos"][:: self.load_interval]
 
         return data_infos
-    
+
     def get_data_info(self, index):
         """Get data info according to the given index.
 
@@ -120,10 +131,10 @@ class Argoverse2Dataset(Custom3DDataset):
         info = self.data_infos[index]
         # standard protocol modified from SECOND.Pytorch
         input_dict = dict(
-            scene_idx=info['scene_id'],
-            timestamp=info['lidar_timestamp_ns'],
+            scene_idx=info["scene_id"],
+            timestamp=info["lidar_timestamp_ns"],
         )
-        if self.modality['use_camera']:
+        if self.modality["use_camera"]:
             image_paths = []
             image_raw_paths = []
             lidar2img_rts = []
@@ -131,27 +142,31 @@ class Argoverse2Dataset(Custom3DDataset):
             intrinsics = []
             extrinsics = []
             img_timestamp = []
-            city_SE3_ego_lidar_t = info['city_SE3_ego_lidar_t']
-            
-            for _, cam_info in info['cam_infos'].items():
+            city_SE3_ego_lidar_t = info["city_SE3_ego_lidar_t"]
+
+            for _, cam_info in info["cam_infos"].items():
                 if cam_info is None:
                     return None
-                image_path = self.data_root / cam_info['fpath']
+                image_path = self.data_root / cam_info["fpath"]
                 image_paths.append(image_path)
-                image_raw_paths.append(cam_info['fpath'])
-                img_timestamp.append(cam_info['cam_timestamp_ns'])
-                city_SE3_ego_cam_t = cam_info['city_SE3_ego_cam_t']
-                ego_SE3_cam = cam_info['ego_SE3_cam']
-                ego_cam_t_SE3_ego_lidar_t = city_SE3_ego_cam_t.inverse().compose(city_SE3_ego_lidar_t) #ego2glo_lidar -> glo2ego_cam
-                cam_SE3_ego_cam_t = ego_SE3_cam.inverse().compose(ego_cam_t_SE3_ego_lidar_t) #ego -> cam
+                image_raw_paths.append(cam_info["fpath"])
+                img_timestamp.append(cam_info["cam_timestamp_ns"])
+                city_SE3_ego_cam_t = cam_info["city_SE3_ego_cam_t"]
+                ego_SE3_cam = cam_info["ego_SE3_cam"]
+                ego_cam_t_SE3_ego_lidar_t = city_SE3_ego_cam_t.inverse().compose(
+                    city_SE3_ego_lidar_t
+                )  # ego2glo_lidar -> glo2ego_cam
+                cam_SE3_ego_cam_t = ego_SE3_cam.inverse().compose(
+                    ego_cam_t_SE3_ego_lidar_t
+                )  # ego -> cam
                 transform_matrix = np.eye(4)
                 transform_matrix[:3, :3] = cam_SE3_ego_cam_t.rotation
                 transform_matrix[:3, 3] = cam_SE3_ego_cam_t.translation
 
-                intrinsic = cam_info['intrinsics']
-                distotion = cam_info['cam_distortion']
+                intrinsic = cam_info["intrinsics"]
+                distotion = cam_info["cam_distortion"]
                 viewpad = np.eye(4)
-                viewpad[:intrinsic.shape[0], :intrinsic.shape[1]] = intrinsic
+                viewpad[: intrinsic.shape[0], : intrinsic.shape[1]] = intrinsic
                 ego2img = viewpad @ transform_matrix
                 intrinsics.append(viewpad)
                 extrinsics.append(transform_matrix)
@@ -167,20 +182,22 @@ class Argoverse2Dataset(Custom3DDataset):
                     intrinsics=intrinsics,
                     extrinsics=extrinsics,
                     city_SE3_ego=city_SE3_ego_lidar_t,
-                ))
+                )
+            )
 
         if not self.test_mode:
             annos = self.get_ann_info(index, input_dict)
-            annos.update( 
+            annos.update(
                 dict(
-                    bboxes=info['gt2d_infos']['gt_2dbboxes'],
-                    labels=info['gt2d_infos']['gt_2dlabels'],
-                    centers2d=info['gt2d_infos']['centers2d'],
-                    depths=info['gt2d_infos']['depths'],)
+                    bboxes=info["gt2d_infos"]["gt_2dbboxes"],
+                    labels=info["gt2d_infos"]["gt_2dlabels"],
+                    centers2d=info["gt2d_infos"]["centers2d"],
+                    depths=info["gt2d_infos"]["depths"],
+                )
             )
-            input_dict['ann_info'] = annos
+            input_dict["ann_info"] = annos
         return input_dict
-    
+
     def get_ann_info(self, index, input_dict):
         """Get annotation info according to the given index.
 
@@ -195,14 +212,14 @@ class Argoverse2Dataset(Custom3DDataset):
                 - gt_labels_3d (np.ndarray): Labels of ground truths.
                 - gt_names (list[str]): Class names of ground truths.
         """
-        info = self.data_infos[index]['gt3d_infos']
+        info = self.data_infos[index]["gt3d_infos"]
         # filter out bbox containing no points
         if self.use_valid_flag:
-            mask = info['valid_flag']
+            mask = info["valid_flag"]
         else:
-            mask = info['num_interior_pts'] > 0
-        gt_bboxes_3d = info['gt_boxes'][mask]
-        gt_names_3d = np.array(info['gt_names'])[mask]
+            mask = info["num_interior_pts"] > 0
+        gt_bboxes_3d = info["gt_boxes"][mask]
+        gt_names_3d = np.array(info["gt_names"])[mask]
         gt_labels_3d = []
         for cat in gt_names_3d:
             if cat in self.CLASSES:
@@ -212,33 +229,34 @@ class Argoverse2Dataset(Custom3DDataset):
         gt_labels_3d = np.array(gt_labels_3d)
 
         gt_bboxes_3d = LiDARInstance3DBoxes(
-            gt_bboxes_3d, #xyzlwh+yaw
+            gt_bboxes_3d,  # xyzlwh+yaw
             box_dim=gt_bboxes_3d.shape[-1],
-            origin=(0.5, 0.5, 0.5)).convert_to(self.box_mode_3d)
+            origin=(0.5, 0.5, 0.5),
+        ).convert_to(self.box_mode_3d)
 
         anns_results = dict(
-            gt_bboxes_3d=gt_bboxes_3d,
-            gt_labels_3d=gt_labels_3d,
-            gt_names=gt_names_3d)
+            gt_bboxes_3d=gt_bboxes_3d, gt_labels_3d=gt_labels_3d, gt_names=gt_names_3d
+        )
         return anns_results
-        
-    
-    def evaluate(self,
-                 results,
-                 metric='waymo',
-                 logger=None,
-                 jsonfile_prefix=None,
-                 submission_prefix=None,
-                 show=False,
-                 out_dir=None,
-                 pipeline=None,
-                 eval_range_m=None):
+
+    def evaluate(
+        self,
+        results,
+        metric="waymo",
+        logger=None,
+        jsonfile_prefix=None,
+        submission_prefix=None,
+        show=False,
+        out_dir=None,
+        pipeline=None,
+        eval_range_m=None,
+    ):
         # from av2.evaluation.detection.utils import DetectionCfg
         # from av2.evaluation.detection.eval import evaluate
         # from av2.utils.io import read_all_annotations, read_feather
 
         dts = self.format_results(results, jsonfile_prefix, submission_prefix)
-        val_anno_path = osp.join(self.data_root, 'val_anno.feather')
+        val_anno_path = osp.join(self.data_root, "val_anno.feather")
         gts = read_feather(val_anno_path)
 
         gts = gts.set_index(["log_id", "timestamp_ns"]).sort_values("category")
@@ -257,7 +275,9 @@ class Argoverse2Dataset(Custom3DDataset):
             eval_range_m=[0.0, 150.0] if eval_range_m is None else eval_range_m,
             eval_only_roi_instances=True,
         )
-        eval_dts, eval_gts, metrics, recall3d = evaluate(dts.reset_index(), gts.reset_index(), cfg)
+        eval_dts, eval_gts, metrics, recall3d = evaluate(
+            dts.reset_index(), gts.reset_index(), cfg
+        )
         valid_categories = sorted(categories) + ["AVERAGE_METRICS"]
         print(metrics.loc[valid_categories])
         ap_dict = {}
@@ -265,12 +285,13 @@ class Argoverse2Dataset(Custom3DDataset):
             ap_dict[index] = row.to_json()
 
         return ap_dict
-        
-    def format_results(self,
-                       outputs,
-                       pklfile_prefix=None,
-                       submission_prefix=None,
-                       ):
+
+    def format_results(
+        self,
+        outputs,
+        pklfile_prefix=None,
+        submission_prefix=None,
+    ):
         """Format the results to .feather file with argo2 format.
 
         Args:
@@ -292,27 +313,27 @@ class Argoverse2Dataset(Custom3DDataset):
 
         assert len(self.data_infos) == len(outputs)
         num_samples = len(outputs)
-        print('\nGot {} samples'.format(num_samples))
-        
+        print("\nGot {} samples".format(num_samples))
+
         serialized_dts_list = []
-        print('\nConvert predictions to Argoverse 2 format')
+        print("\nConvert predictions to Argoverse 2 format")
         for i in mmcv.track_iter_progress(range(num_samples)):
             out_i = outputs[i]
-            if 'pts_bbox' in out_i:
-                out_i = out_i['pts_bbox'] # for MVX-style detector
-            log_id = self.data_infos[i]['scene_id']
-            ts = self.data_infos[i]['lidar_timestamp_ns']
-            cat_id = out_i['labels_3d'].numpy().tolist()
+            if "pts_bbox" in out_i:
+                out_i = out_i["pts_bbox"]  # for MVX-style detector
+            log_id = self.data_infos[i]["scene_id"]
+            ts = self.data_infos[i]["lidar_timestamp_ns"]
+            cat_id = out_i["labels_3d"].numpy().tolist()
             category = [self.CLASSES[i].upper() for i in cat_id]
             serialized_dts = pd.DataFrame(
-                self.box_to_av2(out_i['boxes_3d']).numpy(), columns=list(LABEL_ATTR)
+                self.box_to_av2(out_i["boxes_3d"]).numpy(), columns=list(LABEL_ATTR)
             )
-            serialized_dts["score"] = out_i['scores_3d'].numpy()
+            serialized_dts["score"] = out_i["scores_3d"].numpy()
             serialized_dts["log_id"] = log_id
             serialized_dts["timestamp_ns"] = int(ts)
             serialized_dts["category"] = category
             serialized_dts_list.append(serialized_dts)
-        
+
         dts = (
             pd.concat(serialized_dts_list)
             .set_index(["log_id", "timestamp_ns"])
@@ -323,15 +344,15 @@ class Argoverse2Dataset(Custom3DDataset):
 
         if pklfile_prefix is not None:
             mmcv.mkdir_or_exist(pklfile_prefix)
-            if not pklfile_prefix.endswith(('.feather')):
-                pklfile_prefix = f'{pklfile_prefix}.feather'
+            if not pklfile_prefix.endswith((".feather")):
+                pklfile_prefix = f"{pklfile_prefix}.feather"
             dts.to_feather(pklfile_prefix)
-            print(f'Result is saved to {pklfile_prefix}.')
+            print(f"Result is saved to {pklfile_prefix}.")
 
         dts = dts.set_index(["log_id", "timestamp_ns"]).sort_index()
 
         return dts
-    
+
     def box_to_av2(self, boxes):
         cnt_xyz = boxes.gravity_center
         lwh = boxes.tensor[:, [3, 4, 5]]
@@ -340,9 +361,3 @@ class Argoverse2Dataset(Custom3DDataset):
         quat = yaw_to_quat(yaw)
         argo_cuboid = torch.cat([cnt_xyz, lwh, quat], dim=1)
         return argo_cuboid
-
-
-
-
-
-

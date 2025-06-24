@@ -1,19 +1,19 @@
 import logging
+from enum import Enum
 from typing import Final, Tuple
 
 import numpy as np
 import pandas as pd
-from enum import Enum
+from av2.evaluation.detection.constants import InterpType
 from av2.evaluation.detection.utils import DetectionCfg
 from av2.structures.cuboid import ORDERED_CUBOID_COL_NAMES
-from av2.utils.typing import NDArrayBool, NDArrayFloat, NDArrayInt
 from av2.utils.constants import EPS
-from av2.evaluation.detection.constants import (
-    InterpType,
-)
+from av2.utils.typing import NDArrayBool, NDArrayFloat, NDArrayInt
 
 DTS_COLUMN_NAMES: Final[Tuple[str, ...]] = tuple(ORDERED_CUBOID_COL_NAMES) + ("score",)
-GTS_COLUMN_NAMES: Final[Tuple[str, ...]] = tuple(ORDERED_CUBOID_COL_NAMES) + ("num_interior_pts",)
+GTS_COLUMN_NAMES: Final[Tuple[str, ...]] = tuple(ORDERED_CUBOID_COL_NAMES) + (
+    "num_interior_pts",
+)
 UUID_COLUMN_NAMES: Final[Tuple[str, ...]] = (
     "log_id",
     "timestamp_ns",
@@ -21,6 +21,7 @@ UUID_COLUMN_NAMES: Final[Tuple[str, ...]] = (
 )
 
 logger = logging.getLogger(__name__)
+
 
 class TruePositiveErrorNames(str, Enum):
     """True positive error names."""
@@ -57,15 +58,22 @@ def summarize_metrics(
         The summary metrics.
     """
     # Sample recall values in the [0, 1] interval.
-    recall_interpolated: NDArrayFloat = np.linspace(0, 1, cfg.num_recall_samples, endpoint=True)
+    recall_interpolated: NDArrayFloat = np.linspace(
+        0, 1, cfg.num_recall_samples, endpoint=True
+    )
 
     # Initialize the summary metrics.
     summary = pd.DataFrame(
-        {s.value: cfg.metrics_defaults[i] for i, s in enumerate(tuple(MetricNames))}, index=cfg.categories
+        {s.value: cfg.metrics_defaults[i] for i, s in enumerate(tuple(MetricNames))},
+        index=cfg.categories,
     )
 
-    average_precisions = pd.DataFrame({t: 0.0 for t in cfg.affinity_thresholds_m}, index=cfg.categories)
-    average_recall = pd.DataFrame({t: 0.0 for t in cfg.affinity_thresholds_m}, index=cfg.categories)
+    average_precisions = pd.DataFrame(
+        {t: 0.0 for t in cfg.affinity_thresholds_m}, index=cfg.categories
+    )
+    average_recall = pd.DataFrame(
+        {t: 0.0 for t in cfg.affinity_thresholds_m}, index=cfg.categories
+    )
     for category in cfg.categories:
         # Find detections that have the current category.
         is_category_dts = dts["category"] == category
@@ -74,7 +82,11 @@ def summarize_metrics(
         is_valid_dts = np.logical_and(is_category_dts, dts["is_evaluated"])
 
         # Get valid detections and sort them in descending order.
-        category_dts = dts.loc[is_valid_dts].sort_values(by="score", ascending=False).reset_index(drop=True)
+        category_dts = (
+            dts.loc[is_valid_dts]
+            .sort_values(by="score", ascending=False)
+            .reset_index(drop=True)
+        )
 
         # Find annotations that have the current category.
         is_category_gts = gts["category"] == category
@@ -87,21 +99,31 @@ def summarize_metrics(
             continue
 
         for affinity_threshold_m in cfg.affinity_thresholds_m:
-            true_positives: NDArrayBool = category_dts[affinity_threshold_m].astype(bool).to_numpy()
+            true_positives: NDArrayBool = (
+                category_dts[affinity_threshold_m].astype(bool).to_numpy()
+            )
 
             # Continue if there aren't any true positives.
             if len(true_positives) == 0:
                 continue
 
             # Compute average precision for the current threshold.
-            threshold_average_precision, _, recall = compute_average_precision(true_positives, recall_interpolated, num_gts)
+            threshold_average_precision, _, recall = compute_average_precision(
+                true_positives, recall_interpolated, num_gts
+            )
 
             # Record the average precision.
-            average_precisions.loc[category, affinity_threshold_m] = threshold_average_precision
+            average_precisions.loc[category, affinity_threshold_m] = (
+                threshold_average_precision
+            )
             average_recall.loc[category, affinity_threshold_m] = recall
 
-        mean_average_precisions: NDArrayFloat = average_precisions.loc[category].to_numpy().mean()
-        mean_average_recall: NDArrayFloat = average_recall.loc[category].to_numpy().mean()
+        mean_average_precisions: NDArrayFloat = (
+            average_precisions.loc[category].to_numpy().mean()
+        )
+        mean_average_recall: NDArrayFloat = (
+            average_recall.loc[category].to_numpy().mean()
+        )
 
         # Select only the true positives for each instance.
         middle_idx = len(cfg.affinity_thresholds_m) // 2
@@ -124,10 +146,13 @@ def summarize_metrics(
 
         # Compute Composite Detection Score (CDS).
         cds = mean_average_precisions * np.mean(tp_scores)
-        summary.loc[category] = np.array([mean_average_precisions, *tp_errors, cds, mean_average_recall])
+        summary.loc[category] = np.array(
+            [mean_average_precisions, *tp_errors, cds, mean_average_recall]
+        )
 
     # Return the summary.
     return summary, average_recall
+
 
 def compute_average_precision(
     tps: NDArrayBool, recall_interpolated: NDArrayFloat, num_gts: int
@@ -162,7 +187,10 @@ def compute_average_precision(
     recall3d: float = cum_tps[-1] / num_gts
     return average_precision, precision_interpolated, recall3d
 
-def interpolate_precision(precision: NDArrayFloat, interpolation_method: InterpType = InterpType.ALL) -> NDArrayFloat:
+
+def interpolate_precision(
+    precision: NDArrayFloat, interpolation_method: InterpType = InterpType.ALL
+) -> NDArrayFloat:
     r"""Interpolate the precision at each sampled recall.
 
     This function smooths the precision-recall curve according to the method introduced in Pascal

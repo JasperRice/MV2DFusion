@@ -1,26 +1,44 @@
-import os
-import tqdm
 import json
+import os
+
+import tqdm
 from visual_nuscenes import NuScenes
+
 use_gt = False
-out_dir = './result_vis/'
+out_dir = "./result_vis/"
 result_json = ".../pts_bbox/results_nusc"
-dataroot='data/nuscenes'
+dataroot = "data/nuscenes"
 if not os.path.exists(out_dir):
     os.mkdir(out_dir)
 
 if use_gt:
-    nusc = NuScenes(version='v1.0-trainval', dataroot=dataroot, verbose=True, pred = False, annotations = "sample_annotation")
+    nusc = NuScenes(
+        version="v1.0-trainval",
+        dataroot=dataroot,
+        verbose=True,
+        pred=False,
+        annotations="sample_annotation",
+    )
 else:
-    nusc = NuScenes(version='v1.0-trainval', dataroot=dataroot, verbose=True, pred = True, annotations = result_json, score_thr=0.25)
+    nusc = NuScenes(
+        version="v1.0-trainval",
+        dataroot=dataroot,
+        verbose=True,
+        pred=True,
+        annotations=result_json,
+        score_thr=0.25,
+    )
 
-with open('{}.json'.format(result_json)) as f:
+with open("{}.json".format(result_json)) as f:
     table = json.load(f)
-tokens = list(table['results'].keys())
+tokens = list(table["results"].keys())
 
 for token in tqdm.tqdm(tokens[::50]):
     if use_gt:
-        nusc.render_sample(token, out_path = "./result_vis/"+token+"_gt.png", verbose=False)
+        nusc.render_sample(
+            token, out_path="./result_vis/" + token + "_gt.png", verbose=False
+        )
     else:
-        nusc.render_sample(token, out_path = "./result_vis/"+token+"_pred.png", verbose=False)
-
+        nusc.render_sample(
+            token, out_path="./result_vis/" + token + "_pred.png", verbose=False
+        )

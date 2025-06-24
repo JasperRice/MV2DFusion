@@ -5,17 +5,19 @@
 # ---------------------------------------------
 #  Modified by Shihao Wang
 # ---------------------------------------------
-import math
-import itertools
 import copy
-import torch.distributed as dist
+import itertools
+import math
+import random
+
 import numpy as np
 import torch
+import torch.distributed as dist
+from IPython import embed
 from mmcv.runner import get_dist_info
 from torch.utils.data import Sampler
+
 from .sampler import SAMPLER
-import random
-from IPython import embed
 
 
 @SAMPLER.register_module()
@@ -37,12 +39,9 @@ class DistributedGroupSampler(Sampler):
             processes in the distributed group. Default: 0.
     """
 
-    def __init__(self,
-                 dataset,
-                 samples_per_gpu=1,
-                 num_replicas=None,
-                 rank=None,
-                 seed=0):
+    def __init__(
+        self, dataset, samples_per_gpu=1, num_replicas=None, rank=None, seed=0
+    ):
         _rank, _num_replicas = get_dist_info()
         if num_replicas is None:
             num_replicas = _num_replicas
@@ -55,15 +54,23 @@ class DistributedGroupSampler(Sampler):
         self.epoch = 0
         self.seed = seed if seed is not None else 0
 
-        assert hasattr(self.dataset, 'flag')
+        assert hasattr(self.dataset, "flag")
         self.flag = self.dataset.flag
         self.group_sizes = np.bincount(self.flag)
 
         self.num_samples = 0
         for i, j in enumerate(self.group_sizes):
-            self.num_samples += int(
-                math.ceil(self.group_sizes[i] * 1.0 / self.samples_per_gpu /
-                          self.num_replicas)) * self.samples_per_gpu
+            self.num_samples += (
+                int(
+                    math.ceil(
+                        self.group_sizes[i]
+                        * 1.0
+                        / self.samples_per_gpu
+                        / self.num_replicas
+                    )
+                )
+                * self.samples_per_gpu
+            )
         self.total_size = self.num_samples * self.num_replicas
 
     def __iter__(self):
@@ -79,32 +86,32 @@ class DistributedGroupSampler(Sampler):
                 # add .numpy() to avoid bug when selecting indice in parrots.
                 # TODO: check whether torch.randperm() can be replaced by
                 # numpy.random.permutation().
-                indice = indice[list(
-                    torch.randperm(int(size), generator=g).numpy())].tolist()
+                indice = indice[
+                    list(torch.randperm(int(size), generator=g).numpy())
+                ].tolist()
                 extra = int(
-                    math.ceil(
-                        size * 1.0 / self.samples_per_gpu / self.num_replicas)
+                    math.ceil(size * 1.0 / self.samples_per_gpu / self.num_replicas)
                 ) * self.samples_per_gpu * self.num_replicas - len(indice)
                 # pad indice
                 tmp = indice.copy()
                 for _ in range(extra // size):
                     indice.extend(tmp)
-                indice.extend(tmp[:extra % size])
+                indice.extend(tmp[: extra % size])
                 indices.extend(indice)
 
         assert len(indices) == self.total_size
 
         indices = [
-            indices[j] for i in list(
-                torch.randperm(
-                    len(indices) // self.samples_per_gpu, generator=g))
-            for j in range(i * self.samples_per_gpu, (i + 1) *
-                           self.samples_per_gpu)
+            indices[j]
+            for i in list(
+                torch.randperm(len(indices) // self.samples_per_gpu, generator=g)
+            )
+            for j in range(i * self.samples_per_gpu, (i + 1) * self.samples_per_gpu)
         ]
 
         # subsample
         offset = self.num_samples * self.rank
-        indices = indices[offset:offset + self.num_samples]
+        indices = indices[offset : offset + self.num_samples]
         assert len(indices) == self.num_samples
 
         return iter(indices)
@@ -116,7 +123,7 @@ class DistributedGroupSampler(Sampler):
         self.epoch = epoch
 
 
-def sync_random_seed(seed=None, device='cuda'):
+def sync_random_seed(seed=None, device="cuda"):
     """Make sure different ranks share the same seed.
     All workers must call this function, otherwise it will deadlock.
     This method is generally used in `DistributedSampler`,
@@ -150,6 +157,7 @@ def sync_random_seed(seed=None, device='cuda'):
     dist.broadcast(random_num, src=0)
     return random_num.item()
 
+
 @SAMPLER.register_module()
 class InfiniteGroupEachSampleInBatchSampler(Sampler):
     """
@@ -159,12 +167,9 @@ class InfiniteGroupEachSampleInBatchSampler(Sampler):
     Shuffling is only done for group order, not done within groups.
     """
 
-    def __init__(self, 
-                 dataset,
-                 samples_per_gpu=1,
-                 num_replicas=None,
-                 rank=None,
-                 seed=0):
+    def __init__(
+        self, dataset, samples_per_gpu=1, num_replicas=None, rank=None, seed=0
+    ):
 
         _rank, _num_replicas = get_dist_info()
         if num_replicas is None:
@@ -180,7 +185,7 @@ class InfiniteGroupEachSampleInBatchSampler(Sampler):
 
         self.size = len(self.dataset)
 
-        assert hasattr(self.dataset, 'flag')
+        assert hasattr(self.dataset, "flag")
         self.flag = self.dataset.flag
         self.group_sizes = np.bincount(self.flag)
         self.groups_num = len(self.group_sizes)
@@ -190,14 +195,18 @@ class InfiniteGroupEachSampleInBatchSampler(Sampler):
         # Now, for efficiency, make a dict group_idx: List[dataset sample_idxs]
         self.group_idx_to_sample_idxs = {
             group_idx: np.where(self.flag == group_idx)[0].tolist()
-            for group_idx in range(self.groups_num)}        
+            for group_idx in range(self.groups_num)
+        }
 
         # Get a generator per sample idx. Considering samples over all
-        # GPUs, each sample position has its own generator 
+        # GPUs, each sample position has its own generator
         self.group_indices_per_global_sample_idx = [
-            self._group_indices_per_global_sample_idx(self.rank * self.batch_size + local_sample_idx) 
-            for local_sample_idx in range(self.batch_size)]
-        
+            self._group_indices_per_global_sample_idx(
+                self.rank * self.batch_size + local_sample_idx
+            )
+            for local_sample_idx in range(self.batch_size)
+        ]
+
         # Keep track of a buffer of dataset sample idxs for each local sample idx
         self.buffer_per_local_sample = [[] for _ in range(self.batch_size)]
 
@@ -208,10 +217,12 @@ class InfiniteGroupEachSampleInBatchSampler(Sampler):
             yield from torch.randperm(self.groups_num, generator=g).tolist()
 
     def _group_indices_per_global_sample_idx(self, global_sample_idx):
-        yield from itertools.islice(self._infinite_group_indices(), 
-                                    global_sample_idx, 
-                                    None,
-                                    self.global_batch_size)
+        yield from itertools.islice(
+            self._infinite_group_indices(),
+            global_sample_idx,
+            None,
+            self.global_batch_size,
+        )
 
     def __iter__(self):
         while True:
@@ -219,18 +230,20 @@ class InfiniteGroupEachSampleInBatchSampler(Sampler):
             for local_sample_idx in range(self.batch_size):
                 if len(self.buffer_per_local_sample[local_sample_idx]) == 0:
                     # Finished current group, refill with next group
-                    new_group_idx = next(self.group_indices_per_global_sample_idx[local_sample_idx])
-                    self.buffer_per_local_sample[local_sample_idx] = \
-                        copy.deepcopy(
-                            self.group_idx_to_sample_idxs[new_group_idx])
+                    new_group_idx = next(
+                        self.group_indices_per_global_sample_idx[local_sample_idx]
+                    )
+                    self.buffer_per_local_sample[local_sample_idx] = copy.deepcopy(
+                        self.group_idx_to_sample_idxs[new_group_idx]
+                    )
 
                 curr_batch.append(self.buffer_per_local_sample[local_sample_idx].pop(0))
-            
+
             yield curr_batch
 
     def __len__(self):
         """Length of base dataset."""
         return self.size
-        
+
     def set_epoch(self, epoch):
         self.epoch = epoch

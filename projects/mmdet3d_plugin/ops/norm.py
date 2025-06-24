@@ -13,4 +13,3 @@ class MyBN1d(nn.BatchNorm1d):
     @force_fp32(out_fp16=False)
     def forward(self, input):
         return super(MyBN1d, self).forward(input)
-

@@ -1,29 +1,52 @@
 # Copyright (c) 2023 megvii-model. All Rights Reserved.
 
+import math
+import random
+from os import path as osp
+from pathlib import Path
+
+import numpy as np
 import pandas as pd
 import torch
-import numpy as np
-from mmdet.datasets import DATASETS
 from av2.evaluation.detection.constants import CompetitionCategories
-from pathlib import Path
-from .argoverse2_dataset import Argoverse2Dataset
-import math
-from mmcv.parallel import DataContainer as DC
-import random
-from .av2_utils import DetectionCfg
-from .av2_eval_util import evaluate
 from av2.utils.io import read_feather
-from os import path as osp
+from mmcv.parallel import DataContainer as DC
+from mmdet.datasets import DATASETS
+
+from .argoverse2_dataset import Argoverse2Dataset
+from .av2_eval_util import evaluate
+from .av2_utils import DetectionCfg
 
 LABEL_ATTR = (
-    "tx_m","ty_m","tz_m","length_m","width_m","height_m","qw","qx","qy","qz",
+    "tx_m",
+    "ty_m",
+    "tz_m",
+    "length_m",
+    "width_m",
+    "height_m",
+    "qw",
+    "qx",
+    "qy",
+    "qz",
 )
+
 
 @DATASETS.register_module()
 class Argoverse2DatasetT(Argoverse2Dataset):
     CLASSES = tuple(x.value for x in CompetitionCategories)
-    
-    def __init__(self, collect_keys, seq_mode=False, seq_split_num=1, num_frame_losses=1, queue_length=8, random_length=0, interval_test=False, *args, **kwargs):
+
+    def __init__(
+        self,
+        collect_keys,
+        seq_mode=False,
+        seq_split_num=1,
+        num_frame_losses=1,
+        queue_length=8,
+        random_length=0,
+        interval_test=False,
+        *args,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self.queue_length = queue_length
         self.collect_keys = collect_keys
@@ -33,15 +56,21 @@ class Argoverse2DatasetT(Argoverse2Dataset):
 
         if interval_test:
             data_infos = self.data_infos
-            s1, s2, s3, s4, s5 = data_infos[::5], data_infos[1::5], data_infos[2::5], data_infos[3::5], data_infos[4::5]
-            data_infos = s1 + s2 + s3 + s4 + s5 
+            s1, s2, s3, s4, s5 = (
+                data_infos[::5],
+                data_infos[1::5],
+                data_infos[2::5],
+                data_infos[3::5],
+                data_infos[4::5],
+            )
+            data_infos = s1 + s2 + s3 + s4 + s5
             self.data_infos = data_infos
         if seq_mode:
             self.num_frame_losses = 1
             self.queue_length = 1
             self.seq_split_num = seq_split_num
             self.random_length = 0
-            self._set_sequence_group_flag() # Must be called after load_annotations b/c load_annotations does sorting.
+            self._set_sequence_group_flag()  # Must be called after load_annotations b/c load_annotations does sorting.
 
     def _set_sequence_group_flag(self):
         """
@@ -52,16 +81,16 @@ class Argoverse2DatasetT(Argoverse2Dataset):
 
         curr_sequence = -1
         for idx in range(len(self.data_infos)):
-            if self.data_infos[idx]['scene_id'] != scene_id:
+            if self.data_infos[idx]["scene_id"] != scene_id:
                 # Not first frame and # of sweeps is 0 -> new sequence
-                scene_id = self.data_infos[idx]['scene_id']
+                scene_id = self.data_infos[idx]["scene_id"]
                 curr_sequence += 1
             res.append(curr_sequence)
 
         self.flag = np.array(res, dtype=np.int64)
 
         if self.seq_split_num != 1:
-            if self.seq_split_num == 'all':
+            if self.seq_split_num == "all":
                 self.flag = np.array(range(len(self.data_infos)), dtype=np.int64)
             else:
                 bin_counts = np.bincount(self.flag)
@@ -69,21 +98,27 @@ class Argoverse2DatasetT(Argoverse2Dataset):
                 curr_new_flag = 0
                 for curr_flag in range(len(bin_counts)):
                     curr_sequence_length = np.array(
-                        list(range(0, 
-                                bin_counts[curr_flag], 
-                                math.ceil(bin_counts[curr_flag] / self.seq_split_num)))
-                        + [bin_counts[curr_flag]])
+                        list(
+                            range(
+                                0,
+                                bin_counts[curr_flag],
+                                math.ceil(bin_counts[curr_flag] / self.seq_split_num),
+                            )
+                        )
+                        + [bin_counts[curr_flag]]
+                    )
 
-                    for sub_seq_idx in (curr_sequence_length[1:] - curr_sequence_length[:-1]):
+                    for sub_seq_idx in (
+                        curr_sequence_length[1:] - curr_sequence_length[:-1]
+                    ):
                         for _ in range(sub_seq_idx):
                             new_flags.append(curr_new_flag)
                         curr_new_flag += 1
 
                 assert len(new_flags) == len(self.flag)
                 # assert len(np.bincount(new_flags)) == len(np.bincount(self.flag)) * self.seq_split_num
-                
-                self.flag = np.array(new_flags, dtype=np.int64)
 
+                self.flag = np.array(new_flags, dtype=np.int64)
 
     def prepare_train_data(self, index):
         """
@@ -94,9 +129,11 @@ class Argoverse2DatasetT(Argoverse2Dataset):
             dict: Training data dict of the corresponding index.
         """
         queue = []
-        index_list = list(range(index-self.queue_length-self.random_length+1, index))
+        index_list = list(
+            range(index - self.queue_length - self.random_length + 1, index)
+        )
         random.shuffle(index_list)
-        index_list = sorted(index_list[self.random_length:])
+        index_list = sorted(index_list[self.random_length :])
         index_list.append(index)
         prev_scene_token = None
         for i in index_list:
@@ -106,11 +143,11 @@ class Argoverse2DatasetT(Argoverse2Dataset):
 
             if input_dict is None:
                 return None
-            
+
             if not self.seq_mode:
-                if input_dict['scene_token'] != prev_scene_token:
+                if input_dict["scene_token"] != prev_scene_token:
                     input_dict.update(dict(prev_exists=False))
-                    prev_scene_token = input_dict['scene_token']
+                    prev_scene_token = input_dict["scene_token"]
                 else:
                     input_dict.update(dict(prev_exists=True))
 
@@ -120,8 +157,10 @@ class Argoverse2DatasetT(Argoverse2Dataset):
             queue.append(example)
 
         for k in range(self.num_frame_losses):
-            if self.filter_empty_gt and \
-                (queue[-k-1] is None or ~(queue[-k-1]['gt_labels_3d']._data != -1).any()):
+            if self.filter_empty_gt and (
+                queue[-k - 1] is None
+                or ~(queue[-k - 1]["gt_labels_3d"]._data != -1).any()
+            ):
                 return None
         return self.union2one(queue)
 
@@ -140,24 +179,40 @@ class Argoverse2DatasetT(Argoverse2Dataset):
         self.pre_pipeline(input_dict)
         example = self.pipeline(input_dict)
         return example
-        
+
     def union2one(self, queue):
         for key in self.collect_keys:
-            if key != 'img_metas':
-                queue[-1][key] = DC(torch.stack([each[key].data for each in queue]), cpu_only=False, stack=True, pad_dims=None)
+            if key != "img_metas":
+                queue[-1][key] = DC(
+                    torch.stack([each[key].data for each in queue]),
+                    cpu_only=False,
+                    stack=True,
+                    pad_dims=None,
+                )
             else:
                 queue[-1][key] = DC([each[key].data for each in queue], cpu_only=True)
 
-        for key in ['points']:
+        for key in ["points"]:
             if key in queue[-1]:
                 queue[-1][key] = DC([each[key].data for each in queue], cpu_only=False)
 
         if not self.test_mode:
-            for key in ['gt_bboxes_3d', 'gt_labels_3d', 'gt_bboxes', 'gt_labels', 'centers2d', 'depths']:
-                if key == 'gt_bboxes_3d':
-                    queue[-1][key] = DC([each[key].data for each in queue], cpu_only=True)
+            for key in [
+                "gt_bboxes_3d",
+                "gt_labels_3d",
+                "gt_bboxes",
+                "gt_labels",
+                "centers2d",
+                "depths",
+            ]:
+                if key == "gt_bboxes_3d":
+                    queue[-1][key] = DC(
+                        [each[key].data for each in queue], cpu_only=True
+                    )
                 else:
-                    queue[-1][key] = DC([each[key].data for each in queue], cpu_only=False)
+                    queue[-1][key] = DC(
+                        [each[key].data for each in queue], cpu_only=False
+                    )
 
         queue = queue[-1]
         return queue
@@ -184,59 +239,71 @@ class Argoverse2DatasetT(Argoverse2Dataset):
         info = self.data_infos[index]
         # standard protocal modified from SECOND.Pytorch
 
-        city_SE3_ego = info['city_SE3_ego_lidar_t'] # ego -> global
+        city_SE3_ego = info["city_SE3_ego_lidar_t"]  # ego -> global
         transform_matrix = np.eye(4)
         transform_matrix[:3, :3] = city_SE3_ego.rotation
         transform_matrix[:3, 3] = city_SE3_ego.translation
 
-        ego_pose =  transform_matrix
+        ego_pose = transform_matrix
 
         ego_pose_inv = invert_matrix_egopose_numpy(ego_pose)
-        pts_filename = Path(self.split)/ info['scene_id']  / 'sensors' /  'lidar' / f"{info['lidar_timestamp_ns']}.feather"
+        pts_filename = (
+            Path(self.split)
+            / info["scene_id"]
+            / "sensors"
+            / "lidar"
+            / f"{info['lidar_timestamp_ns']}.feather"
+        )
         input_dict = dict(
             pts_filename=self.data_root / pts_filename,
             ego_pose=ego_pose,
-            ego_pose_inv = ego_pose_inv,
-            scene_token=info['scene_id'],
+            ego_pose_inv=ego_pose_inv,
+            scene_token=info["scene_id"],
             timestamp=index,
-            lidar_timestamp=info['lidar_timestamp_ns'],
+            lidar_timestamp=info["lidar_timestamp_ns"],
         )
 
-        if self.modality['use_camera']:
+        if self.modality["use_camera"]:
             image_paths = []
             image_raw_paths = []
             lidar2img_rts = []
             intrinsics = []
             extrinsics = []
             img_timestamp = []
-            city_SE3_ego_lidar_t = info['city_SE3_ego_lidar_t']
-            for cam_type, cam_info in info['cam_infos'].items():
+            city_SE3_ego_lidar_t = info["city_SE3_ego_lidar_t"]
+            for cam_type, cam_info in info["cam_infos"].items():
                 if cam_info is None:
-                    print('WARNING: no camera data for {}'.format(info['scene_id']))
+                    print("WARNING: no camera data for {}".format(info["scene_id"]))
                     return None
-                img_timestamp.append(cam_info['cam_timestamp_ns']/ 1e9)
-                image_path = self.data_root / cam_info['fpath']
+                img_timestamp.append(cam_info["cam_timestamp_ns"] / 1e9)
+                image_path = self.data_root / cam_info["fpath"]
                 image_paths.append(image_path)
-                image_raw_paths.append(cam_info['fpath'])
+                image_raw_paths.append(cam_info["fpath"])
                 # obtain lidar to image transformation matrix
-                city_SE3_ego_cam_t = cam_info['city_SE3_ego_cam_t']
-                ego_SE3_cam = cam_info['ego_SE3_cam']
-                ego_cam_t_SE3_ego_lidar_t = city_SE3_ego_cam_t.inverse().compose(city_SE3_ego_lidar_t) #ego2glo_lidar -> glo2ego_cam
-                cam_SE3_ego_cam_t = ego_SE3_cam.inverse().compose(ego_cam_t_SE3_ego_lidar_t) #ego -> cam
+                city_SE3_ego_cam_t = cam_info["city_SE3_ego_cam_t"]
+                ego_SE3_cam = cam_info["ego_SE3_cam"]
+                ego_cam_t_SE3_ego_lidar_t = city_SE3_ego_cam_t.inverse().compose(
+                    city_SE3_ego_lidar_t
+                )  # ego2glo_lidar -> glo2ego_cam
+                cam_SE3_ego_cam_t = ego_SE3_cam.inverse().compose(
+                    ego_cam_t_SE3_ego_lidar_t
+                )  # ego -> cam
                 transform_matrix = np.eye(4)
                 transform_matrix[:3, :3] = cam_SE3_ego_cam_t.rotation
                 transform_matrix[:3, 3] = cam_SE3_ego_cam_t.translation
 
-                intrinsic = cam_info['intrinsics']
+                intrinsic = cam_info["intrinsics"]
                 viewpad = np.eye(4)
-                viewpad[:intrinsic.shape[0], :intrinsic.shape[1]] = intrinsic
-                lidar2img_rt = (viewpad @ transform_matrix)
+                viewpad[: intrinsic.shape[0], : intrinsic.shape[1]] = intrinsic
+                lidar2img_rt = viewpad @ transform_matrix
                 intrinsics.append(viewpad)
                 extrinsics.append(transform_matrix)
                 lidar2img_rts.append(lidar2img_rt)
-                
+
             if not self.test_mode:
-                prev_exists  = not (index == 0 or self.flag[index - 1] != self.flag[index])
+                prev_exists = not (
+                    index == 0 or self.flag[index - 1] != self.flag[index]
+                )
             else:
                 prev_exists = None
             input_dict.update(
@@ -247,21 +314,22 @@ class Argoverse2DatasetT(Argoverse2Dataset):
                     intrinsics=intrinsics,
                     extrinsics=extrinsics,
                     prev_exists=prev_exists,
-                ))
+                )
+            )
         if not self.test_mode or True:
             annos = self.get_ann_info(index, input_dict)
-            annos.update( 
+            annos.update(
                 dict(
-                    bboxes=info['gt2d_infos']['gt_2dbboxes'],
-                    labels=info['gt2d_infos']['gt_2dlabels'],
-                    centers2d=info['gt2d_infos']['centers2d'],
-                    depths=info['gt2d_infos']['depths'],
-                    bboxes_ignore=None)
+                    bboxes=info["gt2d_infos"]["gt_2dbboxes"],
+                    labels=info["gt2d_infos"]["gt_2dlabels"],
+                    centers2d=info["gt2d_infos"]["centers2d"],
+                    depths=info["gt2d_infos"]["depths"],
+                    bboxes_ignore=None,
+                )
             )
-            input_dict['ann_info'] = annos
-            
-        return input_dict
+            input_dict["ann_info"] = annos
 
+        return input_dict
 
     def __getitem__(self, idx):
         """Get item from infos according to the given index.
@@ -291,17 +359,19 @@ class Argoverse2DatasetT(Argoverse2Dataset):
         pool = np.where(self.flag != -1)[0]
         return np.random.choice(pool)
 
-    def evaluate(self,
-                 results,
-                 metric='waymo',
-                 logger=None,
-                 load_from=None,
-                 jsonfile_prefix=None,
-                 submission_prefix=None,
-                 show=False,
-                 out_dir=None,
-                 pipeline=None,
-                 eval_range_m=None):
+    def evaluate(
+        self,
+        results,
+        metric="waymo",
+        logger=None,
+        load_from=None,
+        jsonfile_prefix=None,
+        submission_prefix=None,
+        show=False,
+        out_dir=None,
+        pipeline=None,
+        eval_range_m=None,
+    ):
         # from av2.evaluation.detection.utils import DetectionCfg
         # from av2.evaluation.detection.eval import evaluate
         # from av2.utils.io import read_all_annotations, read_feather
@@ -314,9 +384,9 @@ class Argoverse2DatasetT(Argoverse2Dataset):
         else:
             dts = pd.read_feather(load_from)
             dts = dts.set_index(["log_id", "timestamp_ns"]).sort_index()
-            print(f'Result is loaded from {load_from}.')
+            print(f"Result is loaded from {load_from}.")
 
-        val_anno_path = osp.join(self.data_root, 'val_anno.feather')
+        val_anno_path = osp.join(self.data_root, "val_anno.feather")
         gts = read_feather(val_anno_path)
 
         gts = gts.set_index(["log_id", "timestamp_ns"]).sort_values("category")
@@ -335,7 +405,9 @@ class Argoverse2DatasetT(Argoverse2Dataset):
             eval_range_m=[0.0, 150.0] if eval_range_m is None else eval_range_m,
             eval_only_roi_instances=True,
         )
-        eval_dts, eval_gts, metrics, recall3d = evaluate(dts.reset_index(), gts.reset_index(), cfg)
+        eval_dts, eval_gts, metrics, recall3d = evaluate(
+            dts.reset_index(), gts.reset_index(), cfg
+        )
         valid_categories = sorted(categories) + ["AVERAGE_METRICS"]
         print(metrics.loc[valid_categories])
         ap_dict = {}
@@ -344,8 +416,9 @@ class Argoverse2DatasetT(Argoverse2Dataset):
 
         return ap_dict
 
+
 def invert_matrix_egopose_numpy(egopose):
-    """ Compute the inverse transformation of a 4x4 egopose numpy matrix."""
+    """Compute the inverse transformation of a 4x4 egopose numpy matrix."""
     inverse_matrix = np.zeros((4, 4), dtype=np.float32)
     rotation = egopose[:3, :3]
     translation = egopose[:3, 3]
@@ -354,14 +427,10 @@ def invert_matrix_egopose_numpy(egopose):
     inverse_matrix[3, 3] = 1.0
     return inverse_matrix
 
+
 def convert_egopose_to_matrix_numpy(rotation, translation):
     transformation_matrix = np.zeros((4, 4), dtype=np.float32)
     transformation_matrix[:3, :3] = rotation
     transformation_matrix[:3, 3] = translation
     transformation_matrix[3, 3] = 1.0
     return transformation_matrix
-
-
-
-
-

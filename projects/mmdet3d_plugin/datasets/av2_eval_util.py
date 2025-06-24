@@ -1,54 +1,51 @@
-'''
+"""
 Overwrite some functions for adapting to our data loading scheme.
-'''
+"""
 
-import refile
-import numpy as np
-import pyarrow.feather as feather
-import av2.utils.io as io_utils
+import json
 import logging
 import warnings
-from multiprocessing import get_context
-import numpy as np
-import pandas as pd
-from av2.utils.io import TimestampedCitySE3EgoPoses, read_city_SE3_ego
-from av2.evaluation.detection.constants import NUM_DECIMALS, TruePositiveErrorNames
-from av2.evaluation.detection.utils import (
-    compute_average_precision,
-    groupby,
-)
-from .av2_utils import (
-    DetectionCfg,
-    accumulate,
-)
-from av2.geometry.se3 import SE3
-from av2.map.map_api import ArgoverseStaticMap
-from av2.structures.cuboid import ORDERED_CUBOID_COL_NAMES
-from av2.utils.io import TimestampedCitySE3EgoPoses
-from av2.utils.typing import NDArrayBool, NDArrayFloat
-import av2.geometry.geometry as geometry_utils
-
-# from av2.evaluation.detection.eval import summarize_metrics
-from .summarize_metrics_av2 import summarize_metrics
-from typing import Dict, List, Optional, Tuple, Union, Final, Any
-from joblib import Parallel, delayed
-from pathlib import Path
+from dataclasses import dataclass
 # from upath import UPath
 from io import BytesIO
+from multiprocessing import get_context
+from pathlib import Path
+from typing import Any, Dict, Final, List, Optional, Tuple, Union
 
-from dataclasses import dataclass
-import json
+import av2.geometry.geometry as geometry_utils
+import av2.utils.io as io_utils
+import numpy as np
+import pandas as pd
+import pyarrow.feather as feather
+import refile
+from av2.evaluation.detection.constants import (NUM_DECIMALS,
+                                                TruePositiveErrorNames)
+from av2.evaluation.detection.utils import compute_average_precision, groupby
+from av2.geometry.se3 import SE3
+from av2.geometry.sim2 import Sim2
 from av2.map.drivable_area import DrivableArea
 from av2.map.lane_segment import LaneSegment
+from av2.map.map_api import (ArgoverseStaticMap, DrivableAreaMapLayer,
+                             GroundHeightLayer, RoiMapLayer)
 from av2.map.pedestrian_crossing import PedestrianCrossing
-from av2.map.map_api import DrivableAreaMapLayer, RoiMapLayer, GroundHeightLayer
-from av2.geometry.sim2 import Sim2
+from av2.structures.cuboid import ORDERED_CUBOID_COL_NAMES
+from av2.utils.io import TimestampedCitySE3EgoPoses, read_city_SE3_ego
+from av2.utils.typing import NDArrayBool, NDArrayFloat
+from joblib import Parallel, delayed
+
+from .av2_utils import DetectionCfg, accumulate
+# from av2.evaluation.detection.eval import summarize_metrics
+from .summarize_metrics_av2 import summarize_metrics
 
 warnings.filterwarnings("ignore", module="google")
 
-TP_ERROR_COLUMNS: Final[Tuple[str, ...]] = tuple(x.value for x in TruePositiveErrorNames)
+TP_ERROR_COLUMNS: Final[Tuple[str, ...]] = tuple(
+    x.value for x in TruePositiveErrorNames
+)
 DTS_COLUMN_NAMES: Final[Tuple[str, ...]] = tuple(ORDERED_CUBOID_COL_NAMES) + ("score",)
-GTS_COLUMN_NAMES: Final[Tuple[str, ...]] = tuple(ORDERED_CUBOID_COL_NAMES) + ("num_interior_pts",)
+GTS_COLUMN_NAMES: Final[Tuple[str, ...]] = tuple(ORDERED_CUBOID_COL_NAMES) + (
+    "num_interior_pts",
+)
 UUID_COLUMN_NAMES: Final[Tuple[str, ...]] = (
     "log_id",
     "timestamp_ns",
@@ -56,6 +53,7 @@ UUID_COLUMN_NAMES: Final[Tuple[str, ...]] = (
 )
 
 logger = logging.getLogger(__name__)
+
 
 def evaluate(
     dts: pd.DataFrame,
@@ -111,13 +109,29 @@ def evaluate(
     if cfg.eval_only_roi_instances and cfg.dataset_dir is not None:
         logger.info("Loading maps and egoposes ...")
         log_ids: List[str] = gts.loc[:, "log_id"].unique().tolist()
-        log_id_to_avm, log_id_to_timestamped_poses = load_mapped_avm_and_egoposes(log_ids, cfg.dataset_dir)
+        log_id_to_avm, log_id_to_timestamped_poses = load_mapped_avm_and_egoposes(
+            log_ids, cfg.dataset_dir
+        )
 
-    args_list: List[Tuple[NDArrayFloat, NDArrayFloat, DetectionCfg, Optional[ArgoverseStaticMap], Optional[SE3]]] = []
+    args_list: List[
+        Tuple[
+            NDArrayFloat,
+            NDArrayFloat,
+            DetectionCfg,
+            Optional[ArgoverseStaticMap],
+            Optional[SE3],
+        ]
+    ] = []
     uuids = sorted(uuid_to_dts.keys() | uuid_to_gts.keys())
     for uuid in uuids:
         log_id, timestamp_ns, _ = uuid.split(":")
-        args: Tuple[NDArrayFloat, NDArrayFloat, DetectionCfg, Optional[ArgoverseStaticMap], Optional[SE3]]
+        args: Tuple[
+            NDArrayFloat,
+            NDArrayFloat,
+            DetectionCfg,
+            Optional[ArgoverseStaticMap],
+            Optional[SE3],
+        ]
 
         sweep_dts: NDArrayFloat = np.zeros((0, 10))
         sweep_gts: NDArrayFloat = np.zeros((0, 10))
@@ -135,13 +149,19 @@ def evaluate(
 
     logger.info("Starting evaluation ...")
     with get_context("spawn").Pool(processes=n_jobs) as p:
-        outputs: Optional[List[Tuple[NDArrayFloat, NDArrayFloat]]] = p.starmap(accumulate, args_list)
+        outputs: Optional[List[Tuple[NDArrayFloat, NDArrayFloat]]] = p.starmap(
+            accumulate, args_list
+        )
 
     if outputs is None:
-        raise RuntimeError("Accumulation has failed! Please check the integrity of your detections and annotations.")
+        raise RuntimeError(
+            "Accumulation has failed! Please check the integrity of your detections and annotations."
+        )
     dts_list, gts_list = zip(*outputs)
 
-    METRIC_COLUMN_NAMES = cfg.affinity_thresholds_m + TP_ERROR_COLUMNS + ("is_evaluated",)
+    METRIC_COLUMN_NAMES = (
+        cfg.affinity_thresholds_m + TP_ERROR_COLUMNS + ("is_evaluated",)
+    )
     dts_metrics: NDArrayFloat = np.concatenate(dts_list)  # type: ignore
     gts_metrics: NDArrayFloat = np.concatenate(gts_list)  # type: ignore
     dts.loc[:, METRIC_COLUMN_NAMES] = dts_metrics
@@ -155,27 +175,38 @@ def evaluate(
     recall3d = recall3d.round(NUM_DECIMALS)
     return dts, gts, metrics, recall3d
 
-def load_mapped_avm_and_egoposes(log_ids: List[str], dataset_dir: Path
-    ) -> Tuple[Dict[str, ArgoverseStaticMap], Dict[str, TimestampedCitySE3EgoPoses]]:
-        """Load the maps and egoposes for each log in the dataset directory.
-        Args:
-            log_ids: List of the log_ids.
-            dataset_dir: Directory to the dataset.
-        Returns:
-            A tuple of mappings from log id to maps and timestamped-egoposes, respectively.
-        Raises:
-            RuntimeError: If the process for loading maps and timestamped egoposes fails.
-        """
-        log_id_to_timestamped_poses = {log_id: read_city_SE3_ego(dataset_dir / log_id) for log_id in log_ids}
-        avms: Optional[List[ArgoverseStaticMap]] = Parallel(n_jobs=-1, backend="threading")(
-            delayed(ArgoverseStaticMapRemote.from_map_dir_remote)(dataset_dir / log_id / "map", build_raster=True) for log_id in log_ids)
 
-        if avms is None:
-            raise RuntimeError("Map and egopose loading has failed!")
-        log_id_to_avm = {log_ids[i]: avm for i, avm in enumerate(avms)}
-        return log_id_to_avm, log_id_to_timestamped_poses
+def load_mapped_avm_and_egoposes(
+    log_ids: List[str], dataset_dir: Path
+) -> Tuple[Dict[str, ArgoverseStaticMap], Dict[str, TimestampedCitySE3EgoPoses]]:
+    """Load the maps and egoposes for each log in the dataset directory.
+    Args:
+        log_ids: List of the log_ids.
+        dataset_dir: Directory to the dataset.
+    Returns:
+        A tuple of mappings from log id to maps and timestamped-egoposes, respectively.
+    Raises:
+        RuntimeError: If the process for loading maps and timestamped egoposes fails.
+    """
+    log_id_to_timestamped_poses = {
+        log_id: read_city_SE3_ego(dataset_dir / log_id) for log_id in log_ids
+    }
+    avms: Optional[List[ArgoverseStaticMap]] = Parallel(n_jobs=-1, backend="threading")(
+        delayed(ArgoverseStaticMapRemote.from_map_dir_remote)(
+            dataset_dir / log_id / "map", build_raster=True
+        )
+        for log_id in log_ids
+    )
 
-def read_feather_remote(path: Path, columns: Optional[Tuple[str, ...]] = None) -> pd.DataFrame:
+    if avms is None:
+        raise RuntimeError("Map and egopose loading has failed!")
+    log_id_to_avm = {log_ids[i]: avm for i, avm in enumerate(avms)}
+    return log_id_to_avm, log_id_to_timestamped_poses
+
+
+def read_feather_remote(
+    path: Path, columns: Optional[Tuple[str, ...]] = None
+) -> pd.DataFrame:
     """Read Apache Feather data from a .feather file.
     AV2 uses .feather to serialize much of its data. This function handles the deserialization
     process and returns a `pandas` DataFrame with rows corresponding to the records and the
@@ -191,13 +222,15 @@ def read_feather_remote(path: Path, columns: Optional[Tuple[str, ...]] = None) -
         data: pd.DataFrame = feather.read_feather(f, columns=columns)
     return data
 
+
 @dataclass
 class ArgoverseStaticMapRemote(ArgoverseStaticMap):
-    """API to interact with a local map for a single log (within a single city).
-    """
+    """API to interact with a local map for a single log (within a single city)."""
 
     @classmethod
-    def from_json_remote(cls, static_map_path_s3, static_map_path: Path) -> ArgoverseStaticMap:
+    def from_json_remote(
+        cls, static_map_path_s3, static_map_path: Path
+    ) -> ArgoverseStaticMap:
         """Instantiate an Argoverse static map object (without raster data) from a JSON file containing map data.
         Args:
             static_map_path: Path to the JSON file containing map data. The file name must match
@@ -210,15 +243,22 @@ class ArgoverseStaticMapRemote(ArgoverseStaticMap):
         # with refile.smart_open(static_map_path_s3, "rb") as f:
         #     vector_data: Dict[str, Any] = json.load(f)
 
-        vector_drivable_areas = {da["id"]: DrivableArea.from_dict(da) for da in vector_data["drivable_areas"].values()}
-        vector_lane_segments = {ls["id"]: LaneSegment.from_dict(ls) for ls in vector_data["lane_segments"].values()}
+        vector_drivable_areas = {
+            da["id"]: DrivableArea.from_dict(da)
+            for da in vector_data["drivable_areas"].values()
+        }
+        vector_lane_segments = {
+            ls["id"]: LaneSegment.from_dict(ls)
+            for ls in vector_data["lane_segments"].values()
+        }
 
         if "pedestrian_crossings" not in vector_data:
             logger.error("Missing Pedestrian crossings!")
             vector_pedestrian_crossings = {}
         else:
             vector_pedestrian_crossings = {
-                pc["id"]: PedestrianCrossing.from_dict(pc) for pc in vector_data["pedestrian_crossings"].values()
+                pc["id"]: PedestrianCrossing.from_dict(pc)
+                for pc in vector_data["pedestrian_crossings"].values()
             }
 
         return cls(
@@ -232,7 +272,9 @@ class ArgoverseStaticMapRemote(ArgoverseStaticMap):
         )
 
     @classmethod
-    def from_map_dir_remote(cls, log_map_dirpath: Path, build_raster: bool = False, data_root='') -> ArgoverseStaticMap:
+    def from_map_dir_remote(
+        cls, log_map_dirpath: Path, build_raster: bool = False, data_root=""
+    ) -> ArgoverseStaticMap:
         """Instantiate an Argoverse map object from data stored within a map data directory.
         Note: the ground height surface file and associated coordinate mapping is not provided for the
         2.0 Motion Forecasting dataset, so `build_raster` defaults to False. If raster functionality is
@@ -254,23 +296,38 @@ class ArgoverseStaticMapRemote(ArgoverseStaticMap):
         # Load vector map data from JSON file
         # vector_data_fnames = sorted(log_map_dirpath.glob("log_map_archive_*.json"))
         if not len(vector_data_fnames) == 1:
-            raise RuntimeError(f"JSON file containing vector map data is missing (searched in {log_map_dirpath})")
+            raise RuntimeError(
+                f"JSON file containing vector map data is missing (searched in {log_map_dirpath})"
+            )
         vector_data_fname = vector_data_fnames[0]
 
         vector_data_json_path = vector_data_fname
 
-        static_map = cls.from_json_remote(vector_data_json_path, Path(vector_data_json_path))
+        static_map = cls.from_json_remote(
+            vector_data_json_path, Path(vector_data_json_path)
+        )
         static_map.log_id = log_map_dirpath.parent.stem
 
         # Avoid file I/O and polygon rasterization when not needed
         if build_raster:
-            drivable_areas: List[DrivableArea] = list(static_map.vector_drivable_areas.values())
-            static_map.raster_drivable_area_layer = DrivableAreaMapLayer.from_vector_data(drivable_areas=drivable_areas)
-            static_map.raster_roi_layer = RoiMapLayer.from_drivable_area_layer(static_map.raster_drivable_area_layer)
-            static_map.raster_ground_height_layer = GroundHeightLayerRemote.from_file_remote(log_map_dirpath, log_map_dirpath)
+            drivable_areas: List[DrivableArea] = list(
+                static_map.vector_drivable_areas.values()
+            )
+            static_map.raster_drivable_area_layer = (
+                DrivableAreaMapLayer.from_vector_data(drivable_areas=drivable_areas)
+            )
+            static_map.raster_roi_layer = RoiMapLayer.from_drivable_area_layer(
+                static_map.raster_drivable_area_layer
+            )
+            static_map.raster_ground_height_layer = (
+                GroundHeightLayerRemote.from_file_remote(
+                    log_map_dirpath, log_map_dirpath
+                )
+            )
             # static_map.raster_ground_height_layer = GroundHeightLayerRemote.from_file_remote(log_map_dirpath, log_map_dirpath_s3)
 
         return static_map
+
 
 @dataclass(frozen=True)
 class GroundHeightLayerRemote(GroundHeightLayer):
@@ -280,7 +337,9 @@ class GroundHeightLayerRemote(GroundHeightLayer):
     """
 
     @classmethod
-    def from_file_remote(cls, log_map_dirpath: Path, log_map_dirpath_s3) -> GroundHeightLayer:
+    def from_file_remote(
+        cls, log_map_dirpath: Path, log_map_dirpath_s3
+    ) -> GroundHeightLayer:
         """Load ground height values (w/ values at 30 cm resolution) from .npy file, and associated Sim(2) mapping.
         Note: ground height values are stored on disk as a float16 2d-array, but cast to float32 once loaded for
         compatibility with matplotlib.
@@ -292,7 +351,9 @@ class GroundHeightLayerRemote(GroundHeightLayer):
             RuntimeError: If raster ground height layer file is missing or Sim(2) mapping from city to image coordinates
                 is missing.
         """
-        ground_height_npy_fpaths = sorted(log_map_dirpath.glob("*_ground_height_surface____*.npy"))
+        ground_height_npy_fpaths = sorted(
+            log_map_dirpath.glob("*_ground_height_surface____*.npy")
+        )
         # ground_height_npy_fpaths = sorted(refile.smart_glob(log_map_dirpath_s3 + "/*_ground_height_surface____*.npy"))
         if not len(ground_height_npy_fpaths) == 1:
             raise RuntimeError("Raster ground height layer file is missing")
@@ -300,11 +361,13 @@ class GroundHeightLayerRemote(GroundHeightLayer):
         Sim2_json_fpaths = sorted(log_map_dirpath.glob("*___img_Sim2_city.json"))
         # Sim2_json_fpaths = sorted(refile.smart_glob(log_map_dirpath_s3 + "/*___img_Sim2_city.json"))
         if not len(Sim2_json_fpaths) == 1:
-            raise RuntimeError("Sim(2) mapping from city to image coordinates is missing")
+            raise RuntimeError(
+                "Sim(2) mapping from city to image coordinates is missing"
+            )
 
         # load the file with rasterized values
         with ground_height_npy_fpaths[0].open("rb") as f:
-        # with refile.smart_open(ground_height_npy_fpaths[0], "rb") as f:
+            # with refile.smart_open(ground_height_npy_fpaths[0], "rb") as f:
             _bytes = f.read()
         ground_height_array: NDArrayFloat = np.load(BytesIO(_bytes))
 
@@ -316,4 +379,6 @@ class GroundHeightLayerRemote(GroundHeightLayer):
         # s = float(json_data["s"])
         # array_Sim2_city = Sim2(R, t, s)
 
-        return cls(array=ground_height_array.astype(float), array_Sim2_city=array_Sim2_city)
+        return cls(
+            array=ground_height_array.astype(float), array_Sim2_city=array_Sim2_city
+        )

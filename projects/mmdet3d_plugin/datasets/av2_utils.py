@@ -1,31 +1,25 @@
 import logging
 from dataclasses import dataclass
+from math import pi as PI
 from pathlib import Path
 from typing import Optional, Tuple
 
 import numpy as np
-from scipy.spatial.distance import cdist
-
-from av2.evaluation.detection.constants import (
-    MAX_NORMALIZED_ASE,
-    MAX_SCALE_ERROR,
-    MAX_YAW_RAD_ERROR,
-    MIN_AP,
-    MIN_CDS,
-    AffinityType,
-    CompetitionCategories,
-    DistanceType,
-    FilterMetricType,
-)
+import torch
+from av2.evaluation.detection.constants import (MAX_NORMALIZED_ASE,
+                                                MAX_SCALE_ERROR,
+                                                MAX_YAW_RAD_ERROR, MIN_AP,
+                                                MIN_CDS, AffinityType,
+                                                CompetitionCategories,
+                                                DistanceType, FilterMetricType)
 from av2.geometry.geometry import mat_to_xyz, quat_to_mat, wrap_angles
 from av2.geometry.iou import iou_3d_axis_aligned
 from av2.geometry.se3 import SE3
 from av2.map.map_api import ArgoverseStaticMap, RasterLayerType
 from av2.structures.cuboid import Cuboid, CuboidList
 from av2.utils.typing import NDArrayBool, NDArrayFloat, NDArrayInt
-import torch
+from scipy.spatial.distance import cdist
 from torch import Tensor
-from math import pi as PI
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +59,8 @@ class DetectionCfg:
             MAX_SCALE_ERROR,
             MAX_YAW_RAD_ERROR,
         )
-        
+
+
 def accumulate(
     dts: NDArrayFloat,
     gts: NDArrayFloat,
@@ -73,7 +68,7 @@ def accumulate(
     avm: Optional[ArgoverseStaticMap] = None,
     city_SE3_ego: Optional[SE3] = None,
 ) -> Tuple[NDArrayFloat, NDArrayFloat]:
-    
+
     N, M = len(dts), len(gts)
     T, E = len(cfg.affinity_thresholds_m), 3
 
@@ -101,7 +96,9 @@ def accumulate(
 
     if is_evaluated_dts.sum() > 0 and is_evaluated_gts.sum() > 0:
         # Compute true positives by assigning detections and ground truths.
-        dts_assignments, gts_assignments = assign(dts[is_evaluated_dts], gts[is_evaluated_gts], cfg)
+        dts_assignments, gts_assignments = assign(
+            dts[is_evaluated_dts], gts[is_evaluated_gts], cfg
+        )
         dts_augmented[is_evaluated_dts, :-1] = dts_assignments
         gts_augmented[is_evaluated_gts, :-1] = gts_assignments
 
@@ -111,9 +108,14 @@ def accumulate(
     dts_augmented = dts_augmented[inverse_permutation]
     return dts_augmented, gts_augmented
 
-def assign(dts: NDArrayFloat, gts: NDArrayFloat, cfg: DetectionCfg) -> Tuple[NDArrayFloat, NDArrayFloat]:
 
-    affinity_matrix = compute_affinity_matrix(dts[..., :3], gts[..., :3], cfg.affinity_type)
+def assign(
+    dts: NDArrayFloat, gts: NDArrayFloat, cfg: DetectionCfg
+) -> Tuple[NDArrayFloat, NDArrayFloat]:
+
+    affinity_matrix = compute_affinity_matrix(
+        dts[..., :3], gts[..., :3], cfg.affinity_type
+    )
 
     # Get the GT label for each max-affinity GT label, detection pair.
     idx_gts = affinity_matrix.argmax(axis=1)[None]
@@ -149,13 +151,22 @@ def assign(dts: NDArrayFloat, gts: NDArrayFloat, cfg: DetectionCfg) -> Tuple[NDA
         tps_dts = dts[idx_tps_dts]
         tps_gts = gts[idx_tps_gts]
 
-        translation_errors = distance(tps_dts[:, :3], tps_gts[:, :3], DistanceType.TRANSLATION)
+        translation_errors = distance(
+            tps_dts[:, :3], tps_gts[:, :3], DistanceType.TRANSLATION
+        )
         scale_errors = distance(tps_dts[:, 3:6], tps_gts[:, 3:6], DistanceType.SCALE)
-        orientation_errors = distance(tps_dts[:, 6:10], tps_gts[:, 6:10], DistanceType.ORIENTATION)
-        dts_metrics[idx_tps_dts, T:] = np.stack((translation_errors, scale_errors, orientation_errors), axis=-1)
+        orientation_errors = distance(
+            tps_dts[:, 6:10], tps_gts[:, 6:10], DistanceType.ORIENTATION
+        )
+        dts_metrics[idx_tps_dts, T:] = np.stack(
+            (translation_errors, scale_errors, orientation_errors), axis=-1
+        )
     return dts_metrics, gts_metrics
 
-def distance(dts: NDArrayFloat, gts: NDArrayFloat, metric: DistanceType) -> NDArrayFloat:
+
+def distance(
+    dts: NDArrayFloat, gts: NDArrayFloat, metric: DistanceType
+) -> NDArrayFloat:
 
     if metric == DistanceType.TRANSLATION:
         translation_errors: NDArrayFloat = np.linalg.norm(dts - gts, axis=1)  # type: ignore
@@ -171,7 +182,10 @@ def distance(dts: NDArrayFloat, gts: NDArrayFloat, metric: DistanceType) -> NDAr
     else:
         raise NotImplementedError("This distance metric is not implemented!")
 
-def compute_affinity_matrix(dts: NDArrayFloat, gts: NDArrayFloat, metric: AffinityType) -> NDArrayFloat:
+
+def compute_affinity_matrix(
+    dts: NDArrayFloat, gts: NDArrayFloat, metric: AffinityType
+) -> NDArrayFloat:
 
     if metric == AffinityType.CENTER:
         dts_xy_m = dts
@@ -180,6 +194,7 @@ def compute_affinity_matrix(dts: NDArrayFloat, gts: NDArrayFloat, metric: Affini
     else:
         raise NotImplementedError("This affinity metric is not implemented!")
     return affinities
+
 
 def compute_evaluated_dts_mask(
     xyz_m_ego: NDArrayFloat,
@@ -192,7 +207,9 @@ def compute_evaluated_dts_mask(
         return is_evaluated
     norm: NDArrayFloat = np.linalg.norm(xyz_m_ego, axis=1)  # type: ignore
     # is_evaluated = norm < cfg.max_range_m
-    is_evaluated = np.logical_and(norm > cfg.eval_range_m[0], norm < cfg.eval_range_m[1])
+    is_evaluated = np.logical_and(
+        norm > cfg.eval_range_m[0], norm < cfg.eval_range_m[1]
+    )
 
     cumsum: NDArrayInt = np.cumsum(is_evaluated)
     max_idx_arr: NDArrayInt = np.where(cumsum > cfg.max_num_dts_per_category)[0]
@@ -200,6 +217,7 @@ def compute_evaluated_dts_mask(
         max_idx = max_idx_arr[0]
         is_evaluated[max_idx:] = False  # type: ignore
     return is_evaluated
+
 
 def compute_evaluated_gts_mask(
     xyz_m_ego: NDArrayFloat,
@@ -212,19 +230,26 @@ def compute_evaluated_gts_mask(
         is_evaluated = np.zeros((0,), dtype=bool)
         return is_evaluated
     norm: NDArrayFloat = np.linalg.norm(xyz_m_ego, axis=1)  # type: ignore
-    is_evaluated_range = np.logical_and(norm > cfg.eval_range_m[0], norm < cfg.eval_range_m[1])
+    is_evaluated_range = np.logical_and(
+        norm > cfg.eval_range_m[0], norm < cfg.eval_range_m[1]
+    )
     is_evaluated = np.logical_and(is_evaluated_range, num_interior_pts > 0)
     # is_evaluated = np.logical_and(norm < cfg.eval_range_m[1], num_interior_pts > 0)
-    
+
     return is_evaluated
 
-def compute_objects_in_roi_mask(cuboids_ego: NDArrayFloat, city_SE3_ego: SE3, avm: ArgoverseStaticMap) -> NDArrayBool:
+
+def compute_objects_in_roi_mask(
+    cuboids_ego: NDArrayFloat, city_SE3_ego: SE3, avm: ArgoverseStaticMap
+) -> NDArrayBool:
 
     is_within_roi: NDArrayBool
     if len(cuboids_ego) == 0:
         is_within_roi = np.zeros((0,), dtype=bool)
         return is_within_roi
-    cuboid_list_ego: CuboidList = CuboidList([Cuboid.from_numpy(params) for params in cuboids_ego])
+    cuboid_list_ego: CuboidList = CuboidList(
+        [Cuboid.from_numpy(params) for params in cuboids_ego]
+    )
     cuboid_list_city = cuboid_list_ego.transform(city_SE3_ego)
     cuboid_list_vertices_m_city = cuboid_list_city.vertices_m
 
@@ -279,4 +304,3 @@ def yaw_to_quat(yaw_rad: Tensor) -> Tensor:
     xyz_rad[..., -1] = yaw_rad
     quat_wxyz: Tensor = xyz_to_quat(xyz_rad)
     return quat_wxyz
-

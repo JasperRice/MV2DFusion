@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import math
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -15,28 +16,30 @@ from .image_singple_point_query_generator import ImageSinglePointQueryGenerator
 
 @QUERY_GENERATORS.register_module()
 class ImageDistributionQueryGenerator(ImageSinglePointQueryGenerator):
-    def __init__(self,
-                 prob_bin=50,
-                 depth_range=[0.1, 90],
-                 x_range=[-10, 10],
-                 y_range=[-8, 8],
-                 code_size=10,
-
-                 gt_guided_loss=1.0,
-                 gt_guided=False,
-                 gt_guided_weight=0.2,
-                 gt_guided_ratio=0.075,
-                 gt_guided_prob=0.5,
-                 **kwargs,
-                 ):
+    def __init__(
+        self,
+        prob_bin=50,
+        depth_range=[0.1, 90],
+        x_range=[-10, 10],
+        y_range=[-8, 8],
+        code_size=10,
+        gt_guided_loss=1.0,
+        gt_guided=False,
+        gt_guided_weight=0.2,
+        gt_guided_ratio=0.075,
+        gt_guided_prob=0.5,
+        **kwargs,
+    ):
         super(ImageDistributionQueryGenerator, self).__init__(**kwargs)
         self.prob_bin = prob_bin
         center = np.array(self.roi_feat_size)
         x_bins = np.linspace(center[0] + x_range[0], center[0] + x_range[1], prob_bin)
         y_bins = np.linspace(center[1] + y_range[0], center[1] + y_range[1], prob_bin)
         d_bins = np.linspace(depth_range[0], depth_range[1], prob_bin)
-        xyd_bins = torch.tensor(np.stack([x_bins, y_bins, d_bins], axis=-1), dtype=torch.float)
-        self.register_buffer('xyd_bins', xyd_bins)
+        xyd_bins = torch.tensor(
+            np.stack([x_bins, y_bins, d_bins], axis=-1), dtype=torch.float
+        )
+        self.register_buffer("xyd_bins", xyd_bins)
 
         self.gt_guided = gt_guided
         self.gt_guided_weight = gt_guided_weight
@@ -47,29 +50,43 @@ class ImageDistributionQueryGenerator(ImageSinglePointQueryGenerator):
         self.code_size = code_size
 
         self.fc_center = build_linear_layer(
-                self.reg_predictor_cfg,
-                in_features=self.center_last_dim,
-                out_features=prob_bin * 3)
+            self.reg_predictor_cfg,
+            in_features=self.center_last_dim,
+            out_features=prob_bin * 3,
+        )
 
         self.batch_split = True
 
-    @auto_fp16(apply_to=('x', ))
+    @auto_fp16(apply_to=("x",))
     def forward(self, x, proposal_list, img_metas, debug_info=None, **kwargs):
-        n_rois_per_view, n_rois_per_batch = kwargs['n_rois_per_view'], kwargs['n_rois_per_batch']
+        n_rois_per_view, n_rois_per_batch = (
+            kwargs["n_rois_per_view"],
+            kwargs["n_rois_per_batch"],
+        )
 
-        intrinsics, extrinsics = self.get_box_params(proposal_list,
-                                                     [img_meta['intrinsics'] for img_meta in img_metas],
-                                                     [img_meta['extrinsics'] for img_meta in img_metas])
+        intrinsics, extrinsics = self.get_box_params(
+            proposal_list,
+            [img_meta["intrinsics"] for img_meta in img_metas],
+            [img_meta["extrinsics"] for img_meta in img_metas],
+        )
         extra_feats = dict(intrinsic=self.process_intrins_feat(intrinsics))
 
         qg_args = dict()
-        qg_args['rois'] = bbox2roi(proposal_list)
+        qg_args["rois"] = bbox2roi(proposal_list)
         if self.training:
-            qg_args['gt_bboxes'] = kwargs['data']['gt_bboxes']
-            qg_args['gt_depths'] = kwargs['data']['depths']
+            qg_args["gt_bboxes"] = kwargs["data"]["gt_bboxes"]
+            qg_args["gt_depths"] = kwargs["data"]["depths"]
 
         roi_feat, return_feats = self.get_roi_feat(x, proposal_list, extra_feats)
-        center_pred, return_feats = self.get_prediction(roi_feat, intrinsics, extrinsics, extra_feats, return_feats, n_rois_per_batch, qg_args)
+        center_pred, return_feats = self.get_prediction(
+            roi_feat,
+            intrinsics,
+            extrinsics,
+            extra_feats,
+            return_feats,
+            n_rois_per_batch,
+            qg_args,
+        )
 
         return center_pred, return_feats
 
@@ -89,16 +106,25 @@ class ImageDistributionQueryGenerator(ImageSinglePointQueryGenerator):
 
         # extra encoding
         enc_feat = [x]
-        for enc in self.extra_encoding['features']:
-            enc_feat.append(extra_feats.get(enc['type']))
+        for enc in self.extra_encoding["features"]:
+            enc_feat.append(extra_feats.get(enc["type"]))
         enc_feat = torch.cat(enc_feat, dim=1).clamp(min=-5e3, max=5e3)
         x = self.extra_enc(enc_feat)
-        if self.return_cfg.get('enc', False):
-            return_feats['enc'] = x
+        if self.return_cfg.get("enc", False):
+            return_feats["enc"] = x
 
         return x, return_feats
 
-    def get_prediction(self, x, intrinsics, extrinsics, extra_feats, return_feats, n_rois_per_batch, kwargs=dict()):
+    def get_prediction(
+        self,
+        x,
+        intrinsics,
+        extrinsics,
+        extra_feats,
+        return_feats,
+        n_rois_per_batch,
+        kwargs=dict(),
+    ):
         x = torch.nan_to_num(x)
         # separate branches
         x_cls = x
@@ -108,17 +134,20 @@ class ImageDistributionQueryGenerator(ImageSinglePointQueryGenerator):
         x_attr = x
 
         out_dict = {}
-        for output in ['cls', 'size', 'heading', 'center', 'attr']:
-            out_dict[f'x_{output}'] = self.get_output(eval(f'x_{output}'), getattr(self, f'{output}_convs'),
-                                                      getattr(self, f'{output}_fcs'))
+        for output in ["cls", "size", "heading", "center", "attr"]:
+            out_dict[f"x_{output}"] = self.get_output(
+                eval(f"x_{output}"),
+                getattr(self, f"{output}_convs"),
+                getattr(self, f"{output}_fcs"),
+            )
             if self.return_cfg.get(output, False):
-                return_feats[output] = out_dict[f'x_{output}']
+                return_feats[output] = out_dict[f"x_{output}"]
 
-        x_cls = out_dict['x_cls']
-        x_center = out_dict['x_center']
-        x_size = out_dict['x_size']
-        x_heading = out_dict['x_heading']
-        x_attr = out_dict['x_attr']
+        x_cls = out_dict["x_cls"]
+        x_center = out_dict["x_center"]
+        x_size = out_dict["x_size"]
+        x_heading = out_dict["x_heading"]
+        x_attr = out_dict["x_attr"]
 
         cls_score = self.fc_cls(x_cls) if self.with_cls else None
         size_pred = self.fc_size(x_size) if self.with_size else None
@@ -138,47 +167,67 @@ class ImageDistributionQueryGenerator(ImageSinglePointQueryGenerator):
 
         if self.with_cls and self.with_size:
             center_lidar = self.center2lidar(center_integral, intrinsics, extrinsics)
-            bbox_lidar = torch.cat([center_lidar, size_pred,  center_lidar.new_zeros((center_lidar.size(0), 4))], dim=-1)
+            bbox_lidar = torch.cat(
+                [
+                    center_lidar,
+                    size_pred,
+                    center_lidar.new_zeros((center_lidar.size(0), 4)),
+                ],
+                dim=-1,
+            )
             # sin, cos
             bbox_lidar[:, 7] = 1
-            return_feats['cls_scores'] = cls_score[:, :self.cls_out_channels]
-            return_feats['bbox_preds'] = bbox_lidar[:, :self.code_size]
+            return_feats["cls_scores"] = cls_score[:, : self.cls_out_channels]
+            return_feats["bbox_preds"] = bbox_lidar[:, : self.code_size]
 
         assert ((depth_prob.sum(-1) - 1).abs() < 1e-4).all()
         # use gt centers to guide image query generation
         if self.training and (self.gt_guided or self.gt_guided_loss > 0):
-            loss, pred_inds, correct_probs = self.depth_loss(kwargs['gt_bboxes'], kwargs['gt_depths'], kwargs['rois'],
-                                                             depth_logits, self.xyd_bins[:, 2])
+            loss, pred_inds, correct_probs = self.depth_loss(
+                kwargs["gt_bboxes"],
+                kwargs["gt_depths"],
+                kwargs["rois"],
+                depth_logits,
+                self.xyd_bins[:, 2],
+            )
             if loss is not None:
-                return_feats['d_loss'] = loss * self.gt_guided_loss
+                return_feats["d_loss"] = loss * self.gt_guided_loss
                 depth_prob = depth_prob.clone()
                 if self.gt_guided:
                     pred_probs = depth_prob[pred_inds]
                     pred_depths = (pred_probs @ self.xyd_bins[:, 2:3])[:, 0]
                     correct_depths = (correct_probs @ self.xyd_bins[:, 2:3])[:, 0]
-                    ratio_mask = (pred_depths - correct_depths).abs() > correct_depths * self.gt_guided_ratio
+                    ratio_mask = (
+                        pred_depths - correct_depths
+                    ).abs() > correct_depths * self.gt_guided_ratio
                     prob_mask = torch.rand(pred_inds.shape) <= self.gt_guided_prob
                     mask = ratio_mask & prob_mask.to(ratio_mask.device)
-                    depth_prob[pred_inds[mask]] = (1 - self.gt_guided_weight) * pred_probs[mask] + self.gt_guided_weight * correct_probs[mask]
+                    depth_prob[pred_inds[mask]] = (
+                        1 - self.gt_guided_weight
+                    ) * pred_probs[mask] + self.gt_guided_weight * correct_probs[mask]
             else:
-                return_feats['d_loss'] = x.sum() * 0
+                return_feats["d_loss"] = x.sum() * 0
 
             assert ((depth_prob.sum(-1) - 1).abs() < 1e-4).all()
 
-        depth_sample = self.xyd_bins[None, :, 2].repeat(n_rois, 1)[..., None]   # [n_rois, prob_bin, 1]
+        depth_sample = self.xyd_bins[None, :, 2].repeat(n_rois, 1)[
+            ..., None
+        ]  # [n_rois, prob_bin, 1]
         center_sample = torch.cat([center_pred[..., :2], depth_sample], dim=-1)
         total_size = center_sample.size(1)
-        center_sample = self.center2lidar(center_sample.flatten(0, 1),
-                                          intrinsics.repeat_interleave(total_size, dim=0),
-                                          extrinsics.repeat_interleave(total_size, dim=0))
+        center_sample = self.center2lidar(
+            center_sample.flatten(0, 1),
+            intrinsics.repeat_interleave(total_size, dim=0),
+            extrinsics.repeat_interleave(total_size, dim=0),
+        )
         center_sample = center_sample.view(n_rois, total_size, 3)
         center_sample = torch.cat([center_sample, depth_prob[..., None]], dim=-1)
 
         center_sample_batch = center_sample.split(n_rois_per_batch, dim=0)
 
-        return_feats['depth_logits'] = depth_logits
-        return_feats['depth_bin'] = self.xyd_bins[:, 2]
-        return_feats['query_feats'] = x.split(n_rois_per_batch, dim=0)
+        return_feats["depth_logits"] = depth_logits
+        return_feats["depth_bin"] = self.xyd_bins[:, 2]
+        return_feats["query_feats"] = x.split(n_rois_per_batch, dim=0)
         return center_sample_batch, return_feats
 
     @force_fp32()
@@ -214,25 +263,43 @@ class ImageDistributionQueryGenerator(ImageSinglePointQueryGenerator):
             # transform depth values to depth bins
             depth_logits_preds = depth_logits[pred_inds]
             depth_gts = centers[:, 5][gt_inds]
-            depth_bin_gts = (depth_gts - depth_bin[0]) / (depth_bin[-1] - depth_bin[0]) * (len(depth_bin) - 1)
-            depth_bin_gts = depth_bin_gts.clamp(min=0 + 1e-3, max=len(depth_bin) - 1 - 1e-3)
+            depth_bin_gts = (
+                (depth_gts - depth_bin[0])
+                / (depth_bin[-1] - depth_bin[0])
+                * (len(depth_bin) - 1)
+            )
+            depth_bin_gts = depth_bin_gts.clamp(
+                min=0 + 1e-3, max=len(depth_bin) - 1 - 1e-3
+            )
             depth_bin_gts_l = depth_bin_gts.floor().long()
             depth_bin_gts_r = depth_bin_gts_l + 1
             depth_bin_gts_l_w = depth_bin_gts_r - depth_bin_gts
             depth_bin_gts_r_w = 1 - depth_bin_gts_l_w
 
             # ce loss for depth bins
-            ce_loss_l = F.cross_entropy(depth_logits_preds, depth_bin_gts_l, reduction='none') * depth_bin_gts_l_w
-            ce_loss_r = F.cross_entropy(depth_logits_preds, depth_bin_gts_r, reduction='none') * depth_bin_gts_r_w
+            ce_loss_l = (
+                F.cross_entropy(depth_logits_preds, depth_bin_gts_l, reduction="none")
+                * depth_bin_gts_l_w
+            )
+            ce_loss_r = (
+                F.cross_entropy(depth_logits_preds, depth_bin_gts_r, reduction="none")
+                * depth_bin_gts_r_w
+            )
             ce_loss = (ce_loss_l + ce_loss_r).mean()
 
             loss = ce_loss
             correct_probs = torch.zeros_like(depth_logits_preds)
-            correct_probs.scatter_(1, depth_bin_gts_l[:, None], depth_bin_gts_l_w[:, None])
-            correct_probs.scatter_(1, depth_bin_gts_r[:, None], depth_bin_gts_r_w[:, None])
+            correct_probs.scatter_(
+                1, depth_bin_gts_l[:, None], depth_bin_gts_l_w[:, None]
+            )
+            correct_probs.scatter_(
+                1, depth_bin_gts_r[:, None], depth_bin_gts_r_w[:, None]
+            )
             pred_depths = (correct_probs @ depth_bin[:, None])[:, 0]
             assert (correct_probs.sum(-1) == 1).all()
-            assert (((pred_depths - depth_gts).abs() < 2e-1) | (depth_gts > depth_bin[-1])).all()
+            assert (
+                ((pred_depths - depth_gts).abs() < 2e-1) | (depth_gts > depth_bin[-1])
+            ).all()
         else:
             loss = None
             pred_inds = None
@@ -255,4 +322,3 @@ class ImageDistributionQueryGenerator(ImageSinglePointQueryGenerator):
         union = area_a + area_b - intersect
         iou = intersect / (union + eps)
         return iou
-

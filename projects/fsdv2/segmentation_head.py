@@ -1,64 +1,67 @@
 import torch
-from torch import nn as nn
-
-from mmdet.models import HEADS
-from mmdet3d.models.decode_heads.decode_head import Base3DDecodeHead
-from mmcv.runner import auto_fp16, force_fp32 
 from mmcv.cnn import normal_init
-from mmseg.models.builder import build_loss
+from mmcv.runner import auto_fp16, force_fp32
+from mmdet3d.models.decode_heads.decode_head import Base3DDecodeHead
+from mmdet.models import HEADS
 from mmdet.models.builder import build_loss as build_det_loss
+from mmseg.models.builder import build_loss
+from torch import nn as nn
+from torch.utils.checkpoint import checkpoint
 
 from .ops.sst.sst_ops import build_mlp, scatter_v2
-from torch.utils.checkpoint import checkpoint
 
 
 @HEADS.register_module()
 class VoteSegHead(Base3DDecodeHead):
 
-    def __init__(self,
-                 in_channel,
-                 num_classes,
-                 hidden_dims=[],
-                 dropout_ratio=0.5,
-                 conv_cfg=dict(type='Conv1d'),
-                 norm_cfg=dict(type='naiveSyncBN1d'),
-                 act_cfg=dict(type='ReLU'),
-                 loss_decode=dict(
-                     type='CrossEntropyLoss',
-                     use_sigmoid=False,
-                     class_weight=None,
-                     loss_weight=1.0),
-                 loss_vote=dict(
-                     type='L1Loss',
-                 ),
-                 loss_aux=None,
-                 ignore_index=255,
-                 logit_scale=1,
-                 checkpointing=False,
-                 init_bias=None,
-                 init_cfg=None):
+    def __init__(
+        self,
+        in_channel,
+        num_classes,
+        hidden_dims=[],
+        dropout_ratio=0.5,
+        conv_cfg=dict(type="Conv1d"),
+        norm_cfg=dict(type="naiveSyncBN1d"),
+        act_cfg=dict(type="ReLU"),
+        loss_decode=dict(
+            type="CrossEntropyLoss",
+            use_sigmoid=False,
+            class_weight=None,
+            loss_weight=1.0,
+        ),
+        loss_vote=dict(
+            type="L1Loss",
+        ),
+        loss_aux=None,
+        ignore_index=255,
+        logit_scale=1,
+        checkpointing=False,
+        init_bias=None,
+        init_cfg=None,
+    ):
         end_channel = hidden_dims[-1] if len(hidden_dims) > 0 else in_channel
         super(VoteSegHead, self).__init__(
-                 end_channel,
-                 num_classes,
-                 dropout_ratio,
-                 conv_cfg,
-                 norm_cfg,
-                 act_cfg,
-                 loss_decode,
-                 ignore_index,
-                 init_cfg
+            end_channel,
+            num_classes,
+            dropout_ratio,
+            conv_cfg,
+            norm_cfg,
+            act_cfg,
+            loss_decode,
+            ignore_index,
+            init_cfg,
         )
 
         self.pre_seg_conv = None
         if len(hidden_dims) > 0:
-            self.pre_seg_conv = build_mlp(in_channel, hidden_dims, norm_cfg, act=act_cfg['type'])
+            self.pre_seg_conv = build_mlp(
+                in_channel, hidden_dims, norm_cfg, act=act_cfg["type"]
+            )
 
-        self.use_sigmoid = loss_decode.get('use_sigmoid', False)
+        self.use_sigmoid = loss_decode.get("use_sigmoid", False)
         self.bg_label = self.num_classes
         if not self.use_sigmoid:
             self.num_classes += 1
-
 
         self.logit_scale = logit_scale
         self.conv_seg = nn.Linear(end_channel, self.num_classes)
@@ -71,9 +74,11 @@ class VoteSegHead(Base3DDecodeHead):
             self.loss_aux = build_loss(loss_aux)
         else:
             self.loss_aux = None
-        if loss_decode['type'] == 'FocalLoss':
-            self.loss_decode = build_det_loss(loss_decode) # mmdet has a better focal loss supporting single class
-        
+        if loss_decode["type"] == "FocalLoss":
+            self.loss_decode = build_det_loss(
+                loss_decode
+            )  # mmdet has a better focal loss supporting single class
+
         self.loss_vote = build_det_loss(loss_vote)
 
     def init_weights(self):
@@ -85,11 +90,9 @@ class VoteSegHead(Base3DDecodeHead):
         # else:
         #     normal_init(self.conv_seg, mean=0, std=0.01)
 
-    @auto_fp16(apply_to=('voxel_feat',))
+    @auto_fp16(apply_to=("voxel_feat",))
     def forward(self, voxel_feat):
-        """Forward pass.
-
-        """
+        """Forward pass."""
 
         output = voxel_feat
         if self.pre_seg_conv is not None:
@@ -102,7 +105,7 @@ class VoteSegHead(Base3DDecodeHead):
 
         return logits, vote_preds
 
-    @force_fp32(apply_to=('seg_logit', 'vote_preds'))
+    @force_fp32(apply_to=("seg_logit", "vote_preds"))
     def losses(self, seg_logit, vote_preds, seg_label, vote_targets, vote_mask):
         """Compute semantic segmentation loss.
 
@@ -114,16 +117,16 @@ class VoteSegHead(Base3DDecodeHead):
         """
         seg_logit = seg_logit * self.logit_scale
         loss = dict()
-        loss['loss_sem_seg'] = self.loss_decode(seg_logit, seg_label)
+        loss["loss_sem_seg"] = self.loss_decode(seg_logit, seg_label)
         if self.loss_aux is not None:
-            loss['loss_aux'] = self.loss_aux(seg_logit, seg_label)
+            loss["loss_aux"] = self.loss_aux(seg_logit, seg_label)
 
         vote_preds = vote_preds.reshape(-1, self.num_classes, 3)
         if not self.use_sigmoid:
             assert seg_label.max().item() == self.num_classes - 1
         else:
             assert seg_label.max().item() == self.num_classes
-        valid_vote_preds = vote_preds[vote_mask] # [n_valid, num_cls, 3]
+        valid_vote_preds = vote_preds[vote_mask]  # [n_valid, num_cls, 3]
         valid_vote_preds = valid_vote_preds.reshape(-1, 3)
         num_valid = vote_mask.sum()
 
@@ -133,30 +136,33 @@ class VoteSegHead(Base3DDecodeHead):
             assert valid_label.max().item() < self.num_classes
             assert valid_label.min().item() >= 0
 
-            indices = torch.arange(num_valid, device=valid_label.device) * self.num_classes + valid_label
-            valid_vote_preds = valid_vote_preds[indices, :] #[n_valid, 3]
+            indices = (
+                torch.arange(num_valid, device=valid_label.device) * self.num_classes
+                + valid_label
+            )
+            valid_vote_preds = valid_vote_preds[indices, :]  # [n_valid, 3]
 
             valid_vote_targets = vote_targets[vote_mask]
 
-            loss['loss_vote'] = self.loss_vote(valid_vote_preds, valid_vote_targets)
+            loss["loss_vote"] = self.loss_vote(valid_vote_preds, valid_vote_targets)
         else:
-            loss['loss_vote'] = vote_preds.sum() * 0
+            loss["loss_vote"] = vote_preds.sum() * 0
 
         train_cfg = self.train_cfg
-        if train_cfg.get('score_thresh', None) is not None:
-            score_thresh = train_cfg['score_thresh']
+        if train_cfg.get("score_thresh", None) is not None:
+            score_thresh = train_cfg["score_thresh"]
             if self.use_sigmoid:
                 scores = seg_logit.sigmoid()
                 for i in range(len(score_thresh)):
                     thr = score_thresh[i]
-                    name = train_cfg['class_names'][i]
+                    name = train_cfg["class_names"][i]
                     this_scores = scores[:, i]
                     pred_true = this_scores > thr
                     real_true = seg_label == i
                     tp = (pred_true & real_true).sum().float()
-                    loss[f'recall_{name}'] = tp / (real_true.sum().float() + 1e-5)
+                    loss[f"recall_{name}"] = tp / (real_true.sum().float() + 1e-5)
             else:
-                group_names = train_cfg['group_names']
+                group_names = train_cfg["group_names"]
                 score = seg_logit.softmax(1)
                 group_score = self.gather_group_by_names(score[:, :-1])
                 num_fg = score.new_zeros(1)
@@ -164,17 +170,27 @@ class VoteSegHead(Base3DDecodeHead):
                     pred_true = group_score[:, gi] > score_thresh[gi]
                     num_fg += pred_true.sum().float()
                     for name in group_names[gi]:
-                        real_true = seg_label == train_cfg['class_names'].index(name)
+                        real_true = seg_label == train_cfg["class_names"].index(name)
                         tp = (pred_true & real_true).sum().float()
-                        loss[f'recall_{name}'] = tp / (real_true.sum().float() + 1e-5)
-                loss[f'num_fg'] = num_fg
+                        loss[f"recall_{name}"] = tp / (real_true.sum().float() + 1e-5)
+                loss[f"num_fg"] = num_fg
 
         return loss
 
-    def forward_train(self, inputs, img_metas, pts_semantic_mask, vote_targets, vote_mask, return_preds=False):
+    def forward_train(
+        self,
+        inputs,
+        img_metas,
+        pts_semantic_mask,
+        vote_targets,
+        vote_mask,
+        return_preds=False,
+    ):
 
         seg_logits, vote_preds = self.forward(inputs)
-        losses = self.losses(seg_logits, vote_preds, pts_semantic_mask, vote_targets, vote_mask)
+        losses = self.losses(
+            seg_logits, vote_preds, pts_semantic_mask, vote_targets, vote_mask
+        )
         if return_preds:
             return losses, dict(seg_logits=seg_logits, vote_preds=vote_preds)
         else:
@@ -192,11 +208,11 @@ class VoteSegHead(Base3DDecodeHead):
         assert end == scores.size(1) == sum(group_lens)
         gathered_score = torch.stack(score_per_group, dim=1)
         assert gathered_score.size(1) == len(group_lens)
-        return  gathered_score
+        return gathered_score
 
     def gather_group_by_names(self, scores):
-        groups = self.train_cfg['group_names']
-        class_names = self.train_cfg['class_names']
+        groups = self.train_cfg["group_names"]
+        class_names = self.train_cfg["class_names"]
         assert (scores >= 0).all()
         score_per_group = []
         for g in groups:
@@ -206,9 +222,9 @@ class VoteSegHead(Base3DDecodeHead):
             score_per_group.append(scores[:, tmp_idx].sum(1))
 
         gathered_score = torch.stack(score_per_group, dim=1)
-        return  gathered_score
+        return gathered_score
 
-    @force_fp32(apply_to=('points_list',))
+    @force_fp32(apply_to=("points_list",))
     def get_targets(self, points_list, gt_bboxes_list, gt_labels_list):
         bsz = len(points_list)
         label_list = []
@@ -225,20 +241,25 @@ class VoteSegHead(Base3DDecodeHead):
             valid_gt_mask = bbox_labels >= 0
             bboxes = bboxes[valid_gt_mask]
             bbox_labels = bbox_labels[valid_gt_mask]
-            
+
             if len(bbox_labels) == 0:
-                this_label = torch.ones(len(points), device=points.device, dtype=torch.long) * self.bg_label
+                this_label = (
+                    torch.ones(len(points), device=points.device, dtype=torch.long)
+                    * self.bg_label
+                )
                 this_vote_target = torch.zeros_like(points)
                 vote_mask = torch.zeros_like(this_label).bool()
             else:
-                extra_width = self.train_cfg.get('extra_width', None) 
+                extra_width = self.train_cfg.get("extra_width", None)
                 if extra_width is not None:
                     bboxes = bboxes.enlarged_box_hw(extra_width)
                 bboxes7dim = bboxes.__class__(bboxes.tensor[..., :7])
                 inbox_inds = bboxes7dim.points_in_boxes(points.float()).long()
                 # inbox_inds = bboxes.points_in_boxes(points).long()
                 this_label = self.get_point_labels(inbox_inds, bbox_labels)
-                this_vote_target, vote_mask = self.get_vote_target(inbox_inds, points, bboxes)
+                this_vote_target, vote_mask = self.get_vote_target(
+                    inbox_inds, points, bboxes
+                )
 
             label_list.append(this_label)
             vote_target_list.append(this_vote_target)
@@ -249,12 +270,13 @@ class VoteSegHead(Base3DDecodeHead):
         vote_mask = torch.cat(vote_mask_list, dim=0)
 
         return labels, vote_targets, vote_mask
-    
 
     def get_point_labels(self, inbox_inds, bbox_labels):
 
         bg_mask = inbox_inds < 0
-        label = -1 * torch.ones(len(inbox_inds), dtype=torch.long, device=inbox_inds.device)
+        label = -1 * torch.ones(
+            len(inbox_inds), dtype=torch.long, device=inbox_inds.device
+        )
         class_labels = bbox_labels[inbox_inds]
         class_labels[bg_mask] = self.bg_label
         return class_labels
@@ -262,8 +284,10 @@ class VoteSegHead(Base3DDecodeHead):
     def get_vote_target(self, inbox_inds, points, bboxes):
 
         bg_mask = inbox_inds < 0
-        if self.train_cfg.get('centroid_offset', False):
-            centroid, _, inv = scatter_v2(points, inbox_inds, mode='avg', return_inv=True)
+        if self.train_cfg.get("centroid_offset", False):
+            centroid, _, inv = scatter_v2(
+                points, inbox_inds, mode="avg", return_inv=True
+            )
             center_per_point = centroid[inv]
         else:
             center_per_point = bboxes.gravity_center[inbox_inds]
@@ -272,9 +296,9 @@ class VoteSegHead(Base3DDecodeHead):
         target = self.encode_vote_targets(delta)
         vote_mask = ~bg_mask
         return target, vote_mask
-    
+
     def encode_vote_targets(self, delta):
-        return torch.sign(delta) * (delta.abs() ** 0.5) 
-    
+        return torch.sign(delta) * (delta.abs() ** 0.5)
+
     def decode_vote_targets(self, preds):
         return preds * preds.abs()
